@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KCB Buni STK Push</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="card" id="formCard">
+  <h1>Send Payment Prompt</h1>
+  <p class="subtitle">Enter a phone number and amount to receive an M-Pesa/KCB STK push.</p>
+
+  <form id="payForm" novalidate>
+    <label for="phone">Phone number</label>
+    <input type="tel" id="phone" name="phone" placeholder="07XXXXXXXX or 2547XXXXXXXX" required>
+
+    <label for="amount">Amount (KES)</label>
+    <input type="number" id="amount" name="amount" placeholder="e.g. 100" min="1" max="150000" required>
+
+    <button type="submit" id="submitBtn">Send STK Push</button>
+  </form>
+
+  <p class="error" id="errorMsg"></p>
+  <a class="transactions-link" href="transactions.html">View transaction results</a>
+</div>
+
+<div class="card hidden" id="pendingCard">
+  <div class="spinner"></div>
+  <h2>Check your phone</h2>
+  <p>Enter your M-Pesa PIN on the prompt sent to <span id="pendingPhone"></span> to complete the payment of
+     <strong>KES <span id="pendingAmount"></span></strong>.</p>
+  <p class="muted">Waiting for confirmation…</p>
+  <button class="link-btn" id="cancelWait">Cancel and start over</button>
+</div>
+
+<div class="card hidden" id="successCard">
+  <div class="icon success-icon">&#10003;</div>
+  <h2>Payment Successful</h2>
+  <p>Your payment of <strong>KES <span id="successAmount"></span></strong> was received.</p>
+  <p class="muted">Receipt: <span id="successReceipt"></span></p>
+  <button id="successRestart">Make another payment</button>
+</div>
+
+<div class="card hidden" id="failedCard">
+  <div class="icon failed-icon">&#10007;</div>
+  <h2>Payment Not Completed</h2>
+  <p id="failedReason" class="muted"></p>
+  <button id="failedRestart">Try again</button>
+</div>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

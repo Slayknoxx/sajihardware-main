@@ -1,0 +1,21 @@
+# Local secrets and environment configuration
+.env
+.env.*
+!.env.example
+
+# Local databases and backups
+data/*.sqlite*
+data/backups/*
+kcb-buni-app/data/*.sqlite*
+kcb-buni-app/data/backups/*
+
+# Runtime and debug output
+*.log
+tmp_*debug*.php
+debug_credentials.php
+
+# Local editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

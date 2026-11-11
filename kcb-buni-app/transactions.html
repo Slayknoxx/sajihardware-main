@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transaction Results</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<main class="card results-card">
+  <div class="results-header">
+    <h1>Transaction Results</h1>
+    <a class="back-link" href="index.html">New payment</a>
+  </div>
+  <div class="result-tabs" role="group" aria-label="Transaction status">
+    <button class="result-tab active" data-status="ALL" type="button">All</button>
+    <button class="result-tab" data-status="SUCCESS" type="button">Successful</button>
+    <button class="result-tab" data-status="FAILED" type="button">Unsuccessful</button>
+  </div>
+  <p class="error" id="resultsError"></p>
+  <div id="resultsContent" aria-live="polite">Loading transactions...</div>
+</main>
+<script>
+(function () {
+  const content = document.getElementById('resultsContent');
+  const error = document.getElementById('resultsError');
+  let currentStatus = 'ALL';
+
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+    }[character]));
+  }
+
+  async function loadResults() {
+    error.textContent = '';
+    content.textContent = 'Loading transactions...';
+    try {
+      const query = currentStatus === 'ALL' ? '' : '?status=' + currentStatus;
+      const response = await fetch('api/transactions.php' + query);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Could not load transactions.');
+      if (!data.transactions.length) {
+        content.innerHTML = '<p class="empty-results">No transactions in this view.</p>';
+        return;
+      }
+      content.innerHTML = '<table class="results-table"><thead><tr>'
+        + '<th>Status</th><th>Phone</th><th>Amount</th><th>Reference</th><th>Time</th></tr></thead><tbody>'
+        + data.transactions.map(tx => '<tr><td class="status-' + tx.status.toLowerCase() + '">' + escapeHtml(tx.status) + '</td>'
+          + '<td>' + escapeHtml(tx.phone) + '</td><td>KES ' + escapeHtml(tx.amount) + '</td>'
+          + '<td>' + escapeHtml(tx.mpesa_receipt || tx.result_desc || '-') + '</td><td>' + escapeHtml(tx.created_at) + '</td></tr>').join('')
+        + '</tbody></table>';
+    } catch (loadError) {
+      content.textContent = '';
+      error.textContent = loadError.message;
+    }
+  }
+
+  document.querySelectorAll('.result-tab').forEach(tab => tab.addEventListener('click', () => {
+    currentStatus = tab.dataset.status;
+    document.querySelectorAll('.result-tab').forEach(item => item.classList.toggle('active', item === tab));
+    loadResults();
+  }));
+  loadResults();
+})();
+</script>
+</body>
+</html>

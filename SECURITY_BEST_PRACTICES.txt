@@ -1,0 +1,451 @@
+SECURITY BEST PRACTICES FOR ETIMS COMPLIANCE
+==============================================
+
+This document outlines security measures implemented in the ETIMS/VSCU integration
+and best practices for maintaining secure POS operations.
+
+
+1. CRYPTOGRAPHIC SECURITY
+==========================
+
+Receipt Signing (HMAC-SHA256):
+- Every receipt is cryptographically signed using HMAC-SHA256
+- Signature includes: PIN | Receipt No | Date/Time | Amount | Tax
+- Tampering detection: Any change to receipt data invalidates signature
+- Private key: VSCU_VERIFICATION_KEY (keep confidential)
+
+Receipt Encryption (AES-256-GCM):
+- Sensitive receipt data can be encrypted before storage
+- Algorithm: AES-256 in GCM mode (Galois/Counter Mode)
+- IV: 12-byte random for each encryption
+- Tag: Authentication tag for integrity verification
+- Protects against: Eavesdropping, data manipulation
+
+QR Code Protection:
+- QR contains signed transaction data
+- Verification: Scan QR → Extract data → Verify signature
+- Detection: Any modification breaks signature verification
+- Revocation: Can invalidate receipts in system if needed
+
+
+2. ACCESS CONTROL
+=================
+
+User Roles (Already Implemented):
+- EMPLOYEE: Can process sales, view own transactions
+- MANAGER: Can view analytics, reports, manage staff
+- ADMIN: Full system access, can modify settings
+
+Implement Role-Based Access Control:
+- Restrict ETIMS settings to ADMIN only
+- Restrict VAT reports to MANAGER and ADMIN
+- Log all privileged operations
+
+Recommended Access Control Rules:
+```php
+// Checkout (all roles)
+require_role(['ADMIN','MANAGER','EMPLOYEE']);
+
+// ETIMS settings (ADMIN only)
+require_role(['ADMIN']);
+
+// VAT reports (MANAGER and ADMIN)
+require_role(['ADMIN','MANAGER']);
+
+// User management (ADMIN only)
+require_role(['ADMIN']);
+```
+
+
+3. DATA PROTECTION
+==================
+
+In Transit (Network Security):
+1. Use HTTPS only (TLS 1.2 or higher)
+2. Enable HSTS (HTTP Strict Transport Security)
+3. Use strong SSL certificates
+4. Implement certificate pinning for API calls
+
+In Storage (Database Security):
+1. Encrypt sensitive fields:
+   - VSCU_VERIFICATION_KEY
+   - Customer PINs
+   - Employee passwords (already using bcrypt)
+2. Use full-disk encryption
+3. Regular backups to secure location
+4. Database file permissions: 600 (read/write owner only)
+
+At Rest (File Security):
+1. config.php permissions: 640 (owner read/write, group read)
+2. Database file: 600
+3. Backup files: 600
+4. Logs: 640
+
+
+4. PASSWORD & CREDENTIAL MANAGEMENT
+====================================
+
+Strong Password Policy:
+- Minimum 12 characters
+- Mix of uppercase, lowercase, numbers, symbols
+- No dictionary words
+- Change every 90 days
+- No password reuse (last 5 passwords)
+
+VSCU Verification Key Handling:
+- Never log or display in logs
+- Never commit to version control
+- Store only in config.php with restricted permissions
+- Rotate annually or after security breach
+- Use environment variables in production:
+
+Example (use instead of hardcoding):
+```php
+const VSCU_VERIFICATION_KEY = getenv('VSCU_KEY') ?: 'fallback-key';
+```
+
+Setting Environment Variables:
+In .env file (not in version control):
+VSCU_VERIFICATION_KEY=your-long-key-here
+KRA_PIN=A000123456X
+
+Load in config.php:
+```php
+if (file_exists(__DIR__ . '/.env')) {
+    $env = parse_ini_file(__DIR__ . '/.env');
+    foreach ($env as $key => $value) {
+        putenv("$key=$value");
+    }
+}
+```
+
+
+5. API SECURITY
+===============
+
+Input Validation:
+- All user inputs validated and sanitized
+- Use prepared statements (already implemented)
+- Type casting for numeric values
+- Whitelist validation for enums
+
+Output Encoding:
+- JSON encode all responses
+- Escape HTML in displayed data
+- Never output raw database values
+
+Rate Limiting (Recommended):
+Prevent brute force and DoS attacks:
+```php
+// Rate limit checkout to 10 per minute per user
+if (!rateLimitCheck('checkout', $user['id'], 10, 60)) {
+    json_response(['error' => 'Too many requests'], 429);
+}
+```
+
+CORS Protection:
+- Only allow requests from same domain
+- Set proper CORS headers
+- Validate Origin header
+
+CSRF Protection:
+- Use session-based tokens (already implemented)
+- Validate token on state-changing requests
+- Use SameSite cookie attribute
+
+
+6. AUDIT & LOGGING
+===================
+
+What to Log:
+✓ All login attempts (success and failure)
+✓ All transaction creation and modifications
+✓ All ETIMS submissions and responses
+✓ All privilege escalation attempts
+✓ All configuration changes
+✓ All failed validations
+✗ Never log passwords or sensitive keys
+
+Log Format:
+[TIMESTAMP] [LEVEL] [USER] [ACTION] [DETAILS]
+2024-08-29 14:30:45 INFO user123 CHECKOUT REC-20240829-001
+
+Already Implemented:
+- audit_logs table tracks all major actions
+- ETIMS audit log tracks compliance events
+- User can't delete audit logs
+
+Recommended Log Retention:
+- Active logs: 90 days online
+- Archived logs: 7 years (KRA requirement)
+- Automatic rotation when logs exceed 1GB
+
+Log Monitoring:
+Check logs daily for suspicious activity:
+```sql
+-- Recent login attempts
+SELECT * FROM audit_logs 
+WHERE action = 'LOGIN' 
+AND created_at > datetime('now', '-24 hours')
+ORDER BY created_at DESC;
+
+-- Failed ETIMS submissions
+SELECT * FROM etims_audit_log 
+WHERE status_after = 'FAILED'
+AND created_at > datetime('now', '-24 hours');
+
+-- Configuration changes
+SELECT * FROM audit_logs 
+WHERE action LIKE '%CONFIG%'
+ORDER BY created_at DESC;
+```
+
+
+7. NETWORK SECURITY
+===================
+
+Firewall Rules:
+- Restrict database access to local or VPN only
+- Whitelist IP addresses for API calls
+- Block port scanning
+- Rate limit connections
+
+Web Server Hardening:
+```apache
+# .htaccess
+<IfModule mod_ssl.c>
+    SSLEngine On
+    SSLProtocol TLSv1.2 TLSv1.3
+    SSLCipherSuite HIGH:!aNULL:!MD5
+</IfModule>
+
+# Remove sensitive headers
+<IfModule mod_headers.c>
+    Header unset X-Powered-By
+    Header unset Server
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Restrict file access
+<FilesMatch "\.(env|sql|db|sqlite|backup)$">
+    Deny from all
+</FilesMatch>
+```
+
+VPN/Secure Connection:
+- Use VPN for remote access to POS system
+- Encrypt all data in transit
+- Use certificate-based authentication
+
+
+8. COMPLIANCE & AUDITING
+========================
+
+KRA Compliance:
+- Maintain all receipts for 7 years
+- Never modify historical transactions
+- Submit ETIMS data within required timeframes
+- Keep audit trail of all submissions
+- Document any system issues/errors
+
+Data Retention:
+- Sales records: 7 years minimum
+- Audit logs: 7 years minimum
+- Backup files: 90 days minimum
+- System logs: 90 days minimum
+
+Regulatory Audits:
+1. Annual independent audit (recommended)
+2. Quarterly internal audit
+3. Monthly compliance check
+4. Immediate incident investigation
+
+Audit Checklist:
+□ All transactions logged
+□ QR codes verifiable
+□ ETIMS IDs assigned
+□ VAT calculated correctly
+□ No unauthorized access
+□ Backups functional
+□ Encryption keys secure
+□ Audit logs intact
+
+
+9. INCIDENT RESPONSE
+====================
+
+Security Incident Procedures:
+1. Isolate affected system
+2. Stop all transactions
+3. Document the incident
+4. Review audit logs
+5. Assess impact
+6. Notify KRA if required
+7. Implement fix
+8. Resume operations
+9. Post-mortem analysis
+
+Key Incidents:
+
+A. Suspected Key Compromise:
+1. Stop POS operations
+2. Generate new VSCU_VERIFICATION_KEY
+3. Update config.php
+4. Notify KRA
+5. Audit all recent transactions
+6. Resume operations
+
+B. Data Breach:
+1. Assess what data was accessed
+2. Notify affected customers if needed
+3. Review access logs
+4. Implement additional controls
+5. Document and report
+
+C. System Malfunction:
+1. Switch to backup system if available
+2. Restore from recent backup
+3. Verify data integrity
+4. Resume operations
+5. Investigate root cause
+
+Emergency Contact:
+- KRA Support: +254 711 097 000
+- Your IT Support: [Add contact info]
+
+
+10. DISASTER RECOVERY
+=====================
+
+Backup Strategy:
+- Daily automated backups
+- Off-site backup storage
+- Test restore quarterly
+- Multiple backup versions
+- Encrypted backup files
+
+Backup Process:
+```bash
+#!/bin/bash
+BACKUP_DIR="/backups/saji_pos"
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/backup_$DATE.sqlite3"
+
+cp /xamppnew3/htdocs/sarihardware/data/saji_pos.sqlite3 $BACKUP_FILE
+gzip $BACKUP_FILE
+chmod 600 $BACKUP_FILE.gz
+
+# Verify backup
+sqlite3 "$BACKUP_FILE" "SELECT COUNT(*) FROM sales;" > /dev/null
+if [ $? -eq 0 ]; then
+    echo "Backup successful"
+else
+    echo "Backup failed!"
+fi
+
+# Keep only last 30 days
+find $BACKUP_DIR -name "backup_*.sqlite3.gz" -mtime +30 -delete
+```
+
+Recovery Procedure:
+1. Stop POS application
+2. Restore from backup: cp backup_file data/saji_pos.sqlite3
+3. Verify data: SELECT COUNT(*) FROM sales;
+4. Test checkout with sample transaction
+5. Resume operations
+
+
+11. SECURITY CHECKLIST
+======================
+
+Initial Setup:
+□ Generate strong VSCU_VERIFICATION_KEY
+□ Store credentials securely (not in code)
+□ Set file permissions correctly
+□ Enable HTTPS/SSL
+□ Configure firewall rules
+□ Setup automated backups
+□ Create recovery procedures
+□ Test recovery from backup
+
+Ongoing Operations:
+□ Review audit logs daily
+□ Check ETIMS submission status
+□ Verify QR codes on sample receipts
+□ Monitor system performance
+□ Check for security updates
+□ Rotate passwords quarterly
+□ Update SSL certificates before expiry
+
+Monthly:
+□ Run compliance audit
+□ Review access logs for anomalies
+□ Verify backups are working
+□ Update security documentation
+□ Train staff on security protocols
+□ Check for system vulnerabilities
+
+Quarterly:
+□ Test disaster recovery
+□ Review security policies
+□ Conduct security training
+□ Audit user accounts
+□ Check third-party dependencies
+□ Update security patches
+
+
+12. RECOMMENDED ADDITIONAL MEASURES
+====================================
+
+For Enhanced Security:
+
+1. Two-Factor Authentication (2FA):
+```php
+// Implement TOTP (Time-based One-Time Password)
+// Consider using Google Authenticator
+```
+
+2. Biometric Access:
+- Fingerprint or facial recognition
+- Reduces password compromise risk
+
+3. Hardware Security Module (HSM):
+- Stores cryptographic keys securely
+- For high-value installations
+
+4. Transaction Limits:
+- Daily transaction limit per user
+- Requires approval for large amounts
+- Reduces fraud risk
+
+5. Real-time Monitoring:
+- Alert on unusual transaction patterns
+- Anomaly detection system
+- Automated response triggers
+
+6. Insurance:
+- Cyber insurance coverage
+- Business continuity insurance
+- Professional liability insurance
+
+
+SECURITY INCIDENT CONTACT INFORMATION
+=======================================
+
+Add your contact details:
+- Internal IT Support: _______________
+- KRA Support: +254 711 097 000
+- Security Incident Hotline: _______________
+- Backup Location: _______________
+- Off-site Storage: _______________
+
+
+Document Version: 1.0
+Last Updated: August 29, 2024
+Review Frequency: Quarterly
+Next Review Date: November 29, 2024
+
+Approved By: _____________________
+Acknowledged By: _____________________

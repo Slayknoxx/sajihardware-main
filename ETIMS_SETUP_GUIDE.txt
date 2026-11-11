@@ -1,0 +1,553 @@
+SAJI HARDWARE POS - KRA ETIMS & VSCU COMPLIANCE GUIDE
+=======================================================
+
+This guide explains how to set up, configure, and maintain KRA (Kenya Revenue Authority) 
+compliance using ETIMS (Excise Tax Information Management System) and VSCU (Value Serial 
+Compliance Unit) in the SAJI Hardware POS system.
+
+TABLE OF CONTENTS
+=================
+1. Overview
+2. Getting Started
+3. Configuration Steps
+4. Testing & Validation
+5. Daily Operations
+6. Troubleshooting
+7. Security & Best Practices
+8. KRA Compliance Reporting
+9. Appendix
+
+
+1. OVERVIEW
+===========
+
+What is ETIMS/VSCU?
+-------------------
+- ETIMS: Kenya's real-time tax information management system for tracking excisable goods
+- VSCU: Value Serial Compliance Unit - hardware/software for issuing compliant receipts
+- Both systems ensure your POS complies with KRA regulations and proper tax calculation
+
+Key Features Implemented:
+- Automatic VAT (16%) calculation on all sales
+- QR code generation on receipts (VSCU compliance)
+- ETIMS transaction tracking
+- Secure receipt encryption
+- Audit logging for all transactions
+- Real-time KRA compliance monitoring
+
+What You'll Need:
+- KRA PIN (11-digit identifier)
+- VSCU Serial Number (from hardware if applicable)
+- VSCU Verification Key (encryption key)
+- Device ID (unique identifier for your POS)
+
+
+2. GETTING STARTED
+==================
+
+Prerequisites:
+1. Valid KRA PIN registration
+2. VSCU device/certification from KRA (if required for your business category)
+3. Internet connection for QR code generation and KRA API calls
+4. SSL certificate for secure communication (HTTPS)
+
+Initial Setup Checklist:
+□ Obtain KRA PIN
+□ Register VSCU with KRA
+□ Get Verification Key and Serial Number
+□ Create unique Device ID for this POS
+□ Update config.php with credentials
+□ Run database migration
+□ Test with sample transactions
+
+
+3. CONFIGURATION STEPS
+======================
+
+Step 1: Update config.php
+--------------------------
+Edit: /config.php
+
+Replace these constants with your actual values:
+
+    // KRA ETIMS/VSCU Configuration
+    const ETIMS_ENABLED = true;
+    const KRA_PIN = 'A000123456X';  // Your 11-digit KRA PIN
+    const VSCU_SERIAL = 'VSC-2024-001';  // Your VSCU serial number
+    const VSCU_VERIFICATION_KEY = 'your-256-character-hex-key-here';  // From KRA
+    const VSCU_DEVICE_ID = 'pos-001-webuye';  // Unique device identifier
+    
+    // Testing vs Production
+    const ETIMS_SANDBOX = false;  // Set to true for testing, false for production
+    
+    // Security
+    const ENABLE_RECEIPT_ENCRYPTION = true;
+    const ENABLE_RECEIPT_SIGNING = true;
+
+Getting Your KRA PIN:
+1. Visit KRA website: www.kra.go.ke
+2. Register your business if not already registered
+3. Your PIN will be displayed on your KRA registration certificate
+4. Format: 1 letter + 9 digits + 1 letter (e.g., A123456789X)
+
+Getting VSCU Credentials:
+1. Register with KRA for VSCU compliance
+2. Download/receive your VSCU device or certification
+3. The Serial Number is printed on the device
+4. Verification Key is provided in a secure document from KRA
+5. Keep the Verification Key confidential - treat it like a password
+
+Creating Device ID:
+- Must be unique per POS terminal
+- Format: [location-code]-[terminal-number]
+- Example: webuye-001, mombasa-02, nairobi-main-1
+- Use this consistently across all receipts from this terminal
+
+
+Step 2: Run Database Migration
+-------------------------------
+Execute the migration to add ETIMS fields:
+
+From terminal in the project root:
+$ sqlite3 data/saji_pos.sqlite3 < api/migrations/001_add_etims_fields.sql
+
+Or manually execute the SQL commands in api/migrations/001_add_etims_fields.sql
+using your SQLite management tool.
+
+New tables created:
+- etims_config: Stores ETIMS configuration
+- vat_summary: Monthly VAT reporting summary
+- etims_audit_log: Tracks all ETIMS-related changes
+
+New fields added to sales table:
+- vat_amount: Calculated VAT amount
+- vat_rate: VAT percentage used
+- etims_status: Submission status
+- etims_unique_id: Unique ETIMS identifier
+- etims_qr_code: QR code data
+- kra_pin: KRA PIN used for transaction
+- invoice_type: Type of invoice
+- etims_error_message: Any error details
+
+
+Step 3: Populate ETIMS Config
+------------------------------
+Insert your configuration into the database:
+
+INSERT INTO etims_config (
+    kra_pin, 
+    serial_number, 
+    verification_key, 
+    device_id
+) VALUES (
+    'A000123456X',
+    'VSC-2024-001',
+    'your-verification-key',
+    'pos-001-webuye'
+);
+
+
+Step 4: Configure Security
+---------------------------
+Ensure these security settings in config.php:
+
+    const ENABLE_RECEIPT_ENCRYPTION = true;
+    const ENABLE_RECEIPT_SIGNING = true;
+    
+Enable HTTPS in your web server configuration:
+- Use SSL/TLS certificates
+- Redirect HTTP to HTTPS
+- Keep certificates updated
+
+
+4. TESTING & VALIDATION
+=======================
+
+Before Going Live:
+1. Test with ETIMS_SANDBOX = true
+2. Create 5-10 test transactions
+3. Verify QR codes are generated
+4. Check ETIMS audit log for any errors
+5. Verify VAT calculations
+
+Test Checklist:
+□ Complete a cash sale
+□ Verify receipt displays QR code
+□ Check ETIMS ID is assigned
+□ Verify VAT is calculated correctly (16%)
+□ Test with M-Pesa payment (if applicable)
+□ Print receipt and scan QR code
+□ Check database for etims_audit_log entries
+
+Testing VAT Calculations:
+Amount: 500
+VAT = 500 / 1.16 * 0.16 = 68.97
+Total (including VAT) = 500
+
+Verify your system shows:
+- Subtotal: 500
+- VAT (16%): 68.97
+- Total: 568.97
+
+Running Tests via SQL:
+Check QR code generation:
+    SELECT receipt_no, etims_status, etims_qr_code FROM sales 
+    WHERE created_at > datetime('now', '-1 hour')
+    LIMIT 5;
+
+Check ETIMS audit log:
+    SELECT * FROM etims_audit_log 
+    WHERE created_at > datetime('now', '-1 hour')
+    ORDER BY created_at DESC;
+
+Check VAT summary:
+    SELECT * FROM vat_summary 
+    WHERE period_year = strftime('%Y', 'now')
+    AND period_month = strftime('%m', 'now');
+
+
+5. DAILY OPERATIONS
+===================
+
+Normal Workflow:
+1. Process sale as usual through POS
+2. System automatically:
+   - Calculates 16% VAT
+   - Generates ETIMS ID
+   - Creates QR code
+   - Logs transaction
+3. Print receipt (includes QR code)
+4. Customer receives receipt with QR code
+
+What Happens Behind the Scenes:
+1. Checkout Action:
+   - Creates sale record
+   - Calculates VAT
+   - Generates ETIMS unique ID
+   - Creates transaction ID
+   - Generates QR code data (signature-based)
+
+2. Receipt Generation:
+   - Retrieves sale data
+   - Generates QR image from data
+   - Displays ETIMS ID on receipt
+   - Includes VAT breakdown
+
+3. Audit Logging:
+   - Logs all transaction changes
+   - Records ETIMS status changes
+   - Stores API responses
+   - Tracks any errors
+
+Daily VAT Report:
+SELECT 
+    DATE(created_at) as date,
+    COUNT(*) as transactions,
+    SUM(total) as gross_sales,
+    SUM(tax) as total_vat,
+    SUM(subtotal) as taxable_sales
+FROM sales 
+WHERE status = 'COMPLETED'
+GROUP BY DATE(created_at)
+ORDER BY date DESC;
+
+
+6. TROUBLESHOOTING
+==================
+
+Issue: QR Code not generating
+Solution:
+1. Check internet connection (needed for QR image generation)
+2. Verify VSCU_VERIFICATION_KEY in config.php
+3. Check etims_audit_log for errors
+4. Manually generate: curl "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=..."
+
+Issue: ETIMS Status is "FAILED"
+Solution:
+1. Check etims_error_message field in sales table
+2. Verify KRA_PIN is correct (11 digits: A000123456X format)
+3. Check internet connection
+4. Review KRA API documentation for status codes
+5. Retry submission through admin interface (if implemented)
+
+Issue: VAT Calculation Seems Wrong
+Solution:
+VAT is calculated INCLUSIVE, not exclusive:
+Total Amount = 600 KES (includes VAT)
+VAT Amount = 600 / 1.16 * 0.16 = 82.76 KES
+Taxable Base = 600 - 82.76 = 517.24 KES
+
+Verify in database:
+SELECT receipt_no, subtotal, tax, total, 
+       ROUND(total / 1.16 * 0.16, 2) as calculated_vat 
+FROM sales 
+WHERE id = [receipt_id];
+
+Issue: VSCU Credentials Invalid
+Solution:
+1. Double-check credentials in config.php
+2. Verify no extra spaces or special characters
+3. Confirm credentials match KRA registration
+4. Try with ETIMS_SANDBOX = true first
+5. Contact KRA support if still failing
+
+Issue: Database Migration Failed
+Solution:
+1. Ensure SQLite3 is installed
+2. Check file permissions on data/saji_pos.sqlite3
+3. Run migration one statement at a time
+4. Check for existing columns (if re-running migration)
+
+
+7. SECURITY & BEST PRACTICES
+============================
+
+Protection Measures Implemented:
+✓ HMAC-SHA256 signing of receipts
+✓ AES-256-GCM encryption of receipt data
+✓ Unique ETIMS ID per transaction
+✓ Tamper-detection via QR code signature
+✓ Audit logging of all transactions
+✓ User session management
+✓ Input validation and sanitization
+
+Best Practices:
+
+1. Protect Credentials:
+   - Never commit credentials to version control
+   - Use environment variables for sensitive data
+   - Rotate verification keys periodically
+   - Restrict access to config.php
+
+2. Regular Backups:
+   - Backup database daily
+   - Test restore procedures
+   - Store backups securely
+   - Keep 30+ days of backups
+
+3. Audit Trail:
+   - Review etims_audit_log weekly
+   - Monitor for failed submissions
+   - Investigate discrepancies immediately
+   - Keep audit logs for 7 years (KRA requirement)
+
+4. User Management:
+   - Limit admin access
+   - Use strong passwords
+   - Audit user activities
+   - Disable inactive accounts
+
+5. System Updates:
+   - Keep PHP updated to latest stable version
+   - Update SSL certificates before expiry
+   - Monitor for security patches
+   - Test updates on staging first
+
+6. Data Protection:
+   - Enable HTTPS only (no HTTP)
+   - Use CSRF tokens (already implemented)
+   - Implement rate limiting on API endpoints
+   - Use prepared statements (already implemented)
+
+Security Checklist:
+□ config.php protected with file permissions (640)
+□ Database encrypted or on secure drive
+□ Daily automated backups
+□ HTTPS enabled on all endpoints
+□ Strong passwords for all users
+□ Audit logs reviewed weekly
+□ No hardcoded credentials in code
+□ SSL certificate valid and updated
+
+
+8. KRA COMPLIANCE REPORTING
+============================
+
+Monthly VAT Report:
+KRA requires monthly VAT submission showing:
+- Total sales for the month
+- Total VAT collected
+- Payments to suppliers (input VAT)
+- Net VAT payable/refundable
+
+Generate Monthly Report:
+SELECT 
+    strftime('%Y', created_at) as year,
+    strftime('%m', created_at) as month,
+    COUNT(*) as total_transactions,
+    SUM(subtotal) as total_sales_excluding_vat,
+    SUM(tax) as total_vat_collected,
+    SUM(total) as total_sales_including_vat,
+    COUNT(CASE WHEN payment_method='M-Pesa' THEN 1 END) as mpesa_transactions,
+    COUNT(CASE WHEN payment_method='Cash' THEN 1 END) as cash_transactions
+FROM sales 
+WHERE status = 'COMPLETED'
+GROUP BY year, month
+ORDER BY year DESC, month DESC;
+
+Annual Report (for income tax):
+SELECT 
+    strftime('%Y', created_at) as year,
+    COUNT(*) as total_transactions,
+    SUM(total) as annual_turnover,
+    SUM(tax) as annual_vat_collected,
+    COUNT(DISTINCT DATE(created_at)) as trading_days
+FROM sales 
+WHERE status = 'COMPLETED'
+GROUP BY year
+ORDER BY year DESC;
+
+Customer Activity Report (for audit):
+SELECT 
+    customer_name,
+    COUNT(*) as purchase_count,
+    SUM(total) as total_spent,
+    MAX(created_at) as last_purchase
+FROM sales 
+WHERE status = 'COMPLETED'
+GROUP BY customer_name
+HAVING COUNT(*) > 1
+ORDER BY total_spent DESC;
+
+ETIMS Compliance Report:
+SELECT 
+    etims_status,
+    COUNT(*) as count,
+    SUM(total) as amount
+FROM sales
+GROUP BY etims_status;
+
+QR Code Verification Report:
+SELECT 
+    receipt_no,
+    etims_unique_id,
+    etims_qr_code,
+    etims_status,
+    created_at
+FROM sales
+WHERE etims_qr_code IS NOT NULL
+AND status = 'COMPLETED'
+ORDER BY created_at DESC
+LIMIT 100;
+
+Submitting to KRA:
+1. Log into KRA iTax system at itax.kra.go.ke
+2. Use monthly reports generated above
+3. Verify totals match POS records
+4. Submit before deadline (usually 25th of following month)
+5. Keep proof of submission for audit
+
+Important Dates:
+- Monthly VAT due: 25th of following month
+- Annual income tax due: 30th June
+- Annual audit: As per KRA schedule
+- Record retention: 7 years minimum
+
+
+9. APPENDIX
+===========
+
+A. QR Code Format
+-----------------
+Standard VSCU QR format:
+PIN|ReceiptNo|DateTime|GrossAmount|TaxAmount|Signature
+
+Example:
+A000123456X|REC-20240829-001|2024-08-29 14:30:45|1000.00|162.07|a4b3c2d1e0...
+
+Signature: HMAC-SHA256 of concatenated values
+
+B. Database Schema Summary
+---------------------------
+sales table additions:
+- vat_amount DECIMAL: Calculated VAT
+- vat_rate DECIMAL: VAT percentage
+- etims_status VARCHAR: PENDING/SUBMITTED/ACKNOWLEDGED/FAILED
+- etims_unique_id VARCHAR: Unique identifier from ETIMS
+- etims_transaction_id VARCHAR: Transaction reference
+- etims_qr_code TEXT: QR code data
+- kra_pin VARCHAR: KRA PIN used
+- invoice_type VARCHAR: NORMAL/CREDIT_NOTE/DEBIT_NOTE/EXEMPT
+- etims_error_message TEXT: Error details if failed
+
+C. API Endpoints
+----------------
+POST /api.php?action=checkout
+- Creates sale with ETIMS data
+
+GET /api.php?action=receipt&id=[sale_id]
+- Returns receipt including QR code
+
+GET /api.php?action=generate_qr&sale_id=[sale_id]
+- Generates QR code for existing sale
+
+GET /api.php?action=etims_summary
+- Returns ETIMS submission summary
+
+D. Error Codes
+--------------
+ETIMS_STATUS Values:
+- PENDING: Ready to submit to KRA
+- SUBMITTED: Sent to KRA, awaiting acknowledgment
+- ACKNOWLEDGED: Accepted by KRA
+- FAILED: Submission failed, check error message
+- EXEMPTED: Transaction exempt from ETIMS
+
+E. Contact Information
+----------------------
+For technical support on POS implementation:
+- Check etims_audit_log for error details
+- Review error_message field in sales table
+- Verify config.php settings
+
+For KRA ETIMS support:
+- Visit www.kra.go.ke
+- ETIMS Support: +254 711 097 000
+- Email: etims@kra.go.ke
+
+F. Useful SQL Queries
+---------------------
+Check last 10 transactions:
+    SELECT * FROM sales 
+    WHERE status = 'COMPLETED' 
+    ORDER BY created_at DESC 
+    LIMIT 10;
+
+Find failed ETIMS submissions:
+    SELECT * FROM sales 
+    WHERE etims_status = 'FAILED' 
+    ORDER BY created_at DESC;
+
+Verify QR codes:
+    SELECT COUNT(*) as with_qr FROM sales 
+    WHERE etims_qr_code IS NOT NULL;
+
+Check VAT per day:
+    SELECT DATE(created_at) as date, SUM(tax) as daily_vat 
+    FROM sales 
+    WHERE status = 'COMPLETED' 
+    GROUP BY DATE(created_at);
+
+Export for KRA submission:
+    SELECT receipt_no, customer_name, payment_method, 
+           subtotal, tax, total, etims_unique_id, created_at 
+    FROM sales 
+    WHERE status = 'COMPLETED' 
+    AND MONTH(created_at) = MONTH(NOW())
+    ORDER BY created_at;
+
+
+QUICK START SUMMARY
+====================
+
+1. Update config.php with KRA credentials
+2. Run database migration
+3. Test with sample transaction
+4. Verify QR code on receipt
+5. Monitor etims_audit_log for errors
+6. Generate and submit monthly VAT reports to KRA
+
+For questions or issues, refer to the troubleshooting section above.
+
+Last Updated: August 29, 2024
+Version: 1.0

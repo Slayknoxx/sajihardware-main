@@ -1,0 +1,494 @@
+ETIMS IMPLEMENTATION CHECKLIST
+===============================
+
+Complete this checklist to ensure proper setup of KRA ETIMS/VSCU compliance.
+
+
+PRE-IMPLEMENTATION
+==================
+
+□ Backup current database
+   Location: _____________________________
+   
+□ Backup current config.php
+   Location: _____________________________
+   
+□ Document current system version
+   Version: _____________________________
+   
+□ Notify staff of implementation
+   Date Notified: ____/____/________
+   
+□ Plan testing window
+   Testing Date: ____/____/________
+   Duration: _____ hours
+   
+□ Prepare test data
+   Test Transactions: _____ (recommend 10+)
+
+
+OBTAIN KRA CREDENTIALS
+======================
+
+□ KRA PIN obtained
+   Value: A_________X (keep confidential)
+   Source: KRA Registration Certificate
+   
+□ VSCU Serial Number obtained
+   Value: _____________________________
+   Source: Hardware device or KRA document
+   
+□ VSCU Verification Key obtained
+   Received: Yes / No
+   Storage Location: _____________________________
+   
+□ Device ID created
+   Value: _____________________________
+   Format: [location]-[terminal-number]
+
+
+CONFIGURATION
+==============
+
+□ Locate config.php file
+   Path: /config.php
+   
+□ Backup config.php
+   Location: _____________________________
+   
+□ Update KRA_PIN
+   Old value: ____________
+   New value: A_________X
+   
+□ Update VSCU_SERIAL
+   Old value: ____________
+   New value: _____________________________
+   
+□ Update VSCU_VERIFICATION_KEY
+   Old value: [REDACTED]
+   New value: [REDACTED]
+   Verified: Yes / No
+   
+□ Update VSCU_DEVICE_ID
+   Old value: ____________
+   New value: _____________________________
+   
+□ Set ETIMS_ENABLED = true
+   Verified: Yes / No
+   
+□ Set ETIMS_SANDBOX = false (production) or true (testing)
+   Setting: false / true
+   
+□ Enable ENABLE_RECEIPT_ENCRYPTION = true
+   Verified: Yes / No
+   
+□ Enable ENABLE_RECEIPT_SIGNING = true
+   Verified: Yes / No
+   
+□ Save and close config.php
+   Saved: Yes / No
+   
+□ Verify file permissions
+   Expected: 640
+   Actual: ____
+   Fixed: Yes / No
+
+
+DATABASE MIGRATION
+==================
+
+□ Verify SQLite3 is installed
+   Version: _____________________________
+   
+□ Verify database file location
+   Path: /data/saji_pos.sqlite3
+   
+□ Create migrations directory
+   Command: mkdir -p api/migrations
+   Status: Complete / Failed
+   
+□ Copy migration SQL file
+   Source: 001_add_etims_fields.sql
+   Destination: /api/migrations/
+   Verified: Yes / No
+   
+□ Run migration
+   Command: sqlite3 data/saji_pos.sqlite3 < api/migrations/001_add_etims_fields.sql
+   Result: Success / Failed
+   Error message: _____________________________
+   
+□ Verify new columns exist
+   Query: PRAGMA table_info(sales);
+   Expected columns: vat_amount, etims_status, etims_unique_id, etims_qr_code
+   Result: Present / Missing
+   
+□ Verify new tables created
+   Expected tables: etims_config, vat_summary, etims_audit_log
+   
+   Query: SELECT name FROM sqlite_master WHERE type='table';
+   
+   etims_config: Present / Missing
+   vat_summary: Present / Missing
+   etims_audit_log: Present / Missing
+   
+□ Insert ETIMS configuration
+   SQL: INSERT INTO etims_config (kra_pin, serial_number, verification_key, device_id)
+   Status: Complete / Failed
+   Verification: SELECT * FROM etims_config;
+
+
+CODE INSTALLATION
+=================
+
+□ Copy VsculEtims.php
+   Source: VsculEtims.php
+   Destination: /api/VsculEtims.php
+   Verified: Yes / No
+   
+□ Copy updated api.php
+   Backup old version: Yes / No
+   Destination: /api.php
+   Verified: Yes / No
+   
+□ Copy updated app.js
+   Backup old version: Yes / No
+   Destination: /public/assets/app.js
+   Verified: Yes / No
+   
+□ Verify all PHP files have correct permissions
+   Expected: 644
+   Command: chmod 644 api.php public/assets/app.js
+   Status: Complete
+
+
+TEST INSTALLATION
+=================
+
+□ Check for PHP syntax errors
+   Command: php -l api/VsculEtims.php
+   Result: No syntax errors / ERRORS FOUND
+   
+□ Test login to POS system
+   URL: http://localhost/sarihardware
+   Status: Login works / Error
+   
+□ Create test sale
+   Amount: 1,000 KES
+   Payment: Cash
+   Customer: Test Customer
+   Status: Sale created / Failed
+   Receipt No: _____________________________
+   
+□ Verify VAT calculation
+   Amount: 1,000
+   Expected VAT: 137.93
+   Actual VAT: _____________________________
+   Correct: Yes / No
+   
+□ Verify ETIMS ID assigned
+   Query: SELECT etims_unique_id FROM sales WHERE receipt_no = '[Receipt No]';
+   ETIMS ID: _____________________________
+   Status: Present / Missing
+   
+□ Verify QR code generated
+   Query: SELECT etims_qr_code FROM sales WHERE receipt_no = '[Receipt No]';
+   QR Data length: _____ characters
+   Status: Present / Missing
+   
+□ Print receipt
+   Click: Print Receipt button
+   Receipt generated: Yes / No
+   QR code visible: Yes / No
+   
+□ Scan QR code
+   Use: Phone camera or QR scanner app
+   Data retrieved: Yes / No
+   Data format correct: Yes / No
+
+
+AUDIT VERIFICATION
+==================
+
+□ Check audit logs created
+   Query: SELECT COUNT(*) FROM audit_logs WHERE action = 'CHECKOUT';
+   Result: _____ entries
+   Status: Entries found / No entries
+   
+□ Check ETIMS audit log
+   Query: SELECT COUNT(*) FROM etims_audit_log;
+   Result: _____ entries
+   Status: Entries found / No entries
+   
+□ Review error messages
+   Query: SELECT error_message FROM sales WHERE etims_status = 'FAILED';
+   Errors found: Yes / No
+   If yes, details: _____________________________
+   
+□ Verify all transactions have signatures
+   Query: SELECT COUNT(*) FROM sales WHERE receipt_signature IS NULL;
+   Result: _____ null entries
+   Status: All signed / Some missing
+
+
+SECURITY VERIFICATION
+======================
+
+□ Verify HTTPS is enabled
+   Test URL: https://localhost/sarihardware
+   Status: Working / Not working
+   
+□ Check SSL certificate validity
+   Expiry date: ____/____/________
+   Valid: Yes / No
+   
+□ Verify config.php is not accessible
+   Test: curl http://localhost/config.php
+   Result: 404 / File exposed
+   
+□ Verify database file is not accessible
+   Test: curl http://localhost/data/saji_pos.sqlite3
+   Result: 404 / File exposed
+   
+□ Check file permissions
+   config.php: 640 ✓
+   database: 600 ✓
+   api/VsculEtims.php: 644 ✓
+   
+□ Test database encryption
+   If enabled, verify: SELECT * FROM sales (should be readable)
+   Status: Encrypted / Not encrypted
+
+
+PRODUCTION TESTING
+==================
+
+□ Create 5+ realistic test transactions
+   Transaction 1: _____ KES
+   Transaction 2: _____ KES
+   Transaction 3: _____ KES
+   Transaction 4: _____ KES
+   Transaction 5: _____ KES
+   
+□ Test different payment methods
+   □ Cash
+   □ M-Pesa (if applicable)
+   
+□ Test various amounts
+   □ Small amount (< 500 KES)
+   □ Medium amount (500-5000 KES)
+   □ Large amount (> 5000 KES)
+   
+□ Test with different customers
+   □ Walk-in customer
+   □ Named customer
+   
+□ Print receipts from each transaction
+   Receipts printed: _____
+   QR codes visible: _____
+   
+□ Scan each QR code
+   QR codes scanned: _____
+   Data retrieved successfully: _____
+   
+□ Run daily report
+   Command: Generate Daily Report
+   Total sales: _____________________________
+   Total VAT: _____________________________
+   Status: Report generated / Failed
+   
+□ Monitor system performance
+   Response time acceptable: Yes / No
+   No errors in browser console: Yes / No
+   Database queries efficient: Yes / No
+
+
+STAFF TRAINING
+==============
+
+□ Brief all staff members
+   Date: ____/____/________
+   Attendees: _____ people
+   
+□ Show new receipt format
+   
+□ Explain QR code purpose
+   
+□ Review VAT calculations
+   
+□ Document any questions
+   Questions asked: _____________________________
+   
+□ Provide printed guide
+   Copies distributed: _____
+
+
+CUSTOMER COMMUNICATION
+======================
+
+□ Update signage
+   Signs printed: Yes / No
+   Signs posted: Yes / No
+   
+□ Prepare customer message
+   Message: _______________________________________________
+   
+□ Train customer-facing staff
+   Staff informed: Yes / No
+   
+□ Test customer response
+   No issues reported: Yes / No
+
+
+DAILY OPERATIONS START
+======================
+
+□ Set ETIMS_SANDBOX = false
+   Changed: Yes / No
+   Verified: Yes / No
+   
+□ Run first real transaction
+   Amount: _____________________________
+   Result: Success / Failed
+   
+□ Verify ETIMS submission
+   Query: SELECT etims_status FROM sales ORDER BY id DESC LIMIT 1;
+   Status: PENDING / SUBMITTED / Other: __________
+   
+□ Monitor first 10 transactions
+   Transactions completed: _____
+   All ETIMS IDs assigned: Yes / No
+   All QR codes generated: Yes / No
+   
+□ Check for any errors
+   Error count: _____
+   Error messages: _____________________________
+   
+□ Verify receipts printing
+   Print tests: _____
+   All successful: Yes / No
+   
+□ Monitor database size
+   Initial size: _____ MB
+   Expected growth rate: _____ MB/day
+
+
+FIRST WEEK MONITORING
+====================
+
+Daily:
+□ Check ETIMS audit log for errors
+□ Verify VAT calculations
+□ Monitor transaction volumes
+□ Review any failed submissions
+
+Issues encountered:
+Day 1: _____________________________
+Day 2: _____________________________
+Day 3: _____________________________
+Day 4: _____________________________
+Day 5: _____________________________
+
+Resolutions:
+Issue 1: _____________________________
+Issue 2: _____________________________
+Issue 3: _____________________________
+
+□ Backup database daily
+□ Review audit logs for security
+
+
+FIRST MONTH COMPLIANCE
+======================
+
+□ Generate first VAT report
+   Report date: ____/____/________
+   Total sales: _____________________________
+   Total VAT: _____________________________
+   
+□ Verify no discrepancies
+   Query: SELECT SUM(tax) FROM sales;
+   Total VAT calculated: _____________________________
+   Matches report: Yes / No
+   
+□ Prepare KRA submission
+   Report generated: Yes / No
+   Data verified: Yes / No
+   
+□ Document any issues
+   Issues: _____________________________
+   Resolutions: _____________________________
+   
+□ Update security settings
+   □ Rotate passwords
+   □ Update VSCU key if needed
+   □ Review access logs
+
+
+ONGOING MAINTENANCE
+===================
+
+Weekly:
+□ Review ETIMS audit log
+□ Check for failed submissions
+□ Verify backups
+□ Monitor system performance
+
+Monthly:
+□ Generate compliance report
+□ Review all transactions
+□ Audit security access
+□ Update documentation
+
+Quarterly:
+□ Test disaster recovery
+□ Review security settings
+□ Check for updates
+□ Conduct staff training
+
+
+SIGN-OFF
+========
+
+Prepared by: _____________________________
+Date: ____/____/________
+
+Reviewed by: _____________________________
+Date: ____/____/________
+
+Approved by: _____________________________
+Date: ____/____/________
+
+System is production-ready: Yes / No
+
+If No, outstanding issues:
+_________________________________________________________________
+_________________________________________________________________
+
+
+CONTACTS
+========
+
+System Administrator: _____________________________
+Phone: _____________________________
+Email: _____________________________
+
+KRA Support: +254 711 097 000
+KRA Email: etims@kra.go.ke
+
+Backup Administrator: _____________________________
+Phone: _____________________________
+
+IT Support: _____________________________
+Phone: _____________________________
+
+
+DOCUMENT CONTROL
+================
+
+Version: 1.0
+Created: August 29, 2024
+Last Updated: August 29, 2024
+Next Review: December 29, 2024
+Frequency: Quarterly
+
+Maintain and update this checklist for each new POS installation or major update.

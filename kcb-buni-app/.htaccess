@@ -1,0 +1,21 @@
+Options -Indexes
+
+<IfModule mod_php.c>
+    AcceptPathInfo On
+</IfModule>
+<IfModule mod_php7.c>
+    AcceptPathInfo On
+</IfModule>
+<IfModule mod_php8.c>
+    AcceptPathInfo On
+</IfModule>
+
+# Block direct access to sensitive files
+<FilesMatch "^(\.env|config\.php|db\.php|kcb_client\.php)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "DENY"
+</IfModule>
