@@ -1,6 +1,8 @@
-const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json'}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Request failed'); return j});
-const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
-const state = {user:null, products:[], cart:[], page:'dashboard'};
+let csrfToken = '';
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok){const error=new Error(j.error||'Request failed'); error.code=j.code; error.license=j.license; if(j.code==='PASSWORD_CHANGE_REQUIRED') showForcedPassword(); throw error;} return j});
+const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
+const state = {user:null, products:[], cart:[], page:'dashboard', license:null};
 const money = n => `KES ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const showPaymentLoading = (label='Waiting for M-Pesa confirmation...') => {
   const modal = document.getElementById('paymentLoadingModal');
@@ -60,9 +62,12 @@ async function boot(){
 
   try {
     const me = await api('me', null, 'GET');
+    csrfToken = me.csrf || csrfToken;
+    state.license = me.license || null;
     if (me.user && me.user.id) {
       state.user = me.user;
       showApp();
+      if (me.must_change_password) showForcedPassword();
       return;
     }
   } catch (err) {
@@ -102,11 +107,52 @@ function startConnectionMonitor(){
 function showApp(){
   qs('#login').classList.add('hidden'); qs('#app').classList.remove('hidden');
   qs('#userPill').textContent = `${state.user.full_name || state.user.username} · ${state.user.role}`;
-  renderNav(); openPage('dashboard');
+  renderNav(); renderLicenseBanner(); openPage('dashboard').catch(err=>toast(err.message));
+}
+function renderLicenseBanner(){
+  const banner = qs('#licenseBanner');
+  if (!banner) return;
+  const l = state.license;
+  if (!l || l.state === 'active') { banner.classList.add('hidden'); return; }
+  let text = l.message || '';
+  let danger = false;
+  if (l.state === 'trial') {
+    text = `Free trial: ${l.days_left} day${l.days_left === 1 ? '' : 's'} left. Activate a license from Settings.`;
+  } else if (l.state === 'grace') {
+    text = `License expired: ${l.days_left} day${l.days_left === 1 ? '' : 's'} of grace remaining. Renew from Settings.`;
+    danger = true;
+  } else if (l.state === 'expired') {
+    text = 'Your license has expired. Enter a renewed key from Settings.';
+    danger = true;
+  } else if (l.state === 'trial_expired') {
+    text = 'Your free trial has ended. Enter a license key from Settings to continue.';
+    danger = true;
+  } else if (l.state === 'revoked' || l.state === 'invalid') {
+    text = l.message || 'This installation is not licensed.';
+    danger = true;
+  } else if (l.state === 'clock_tampered') {
+    text = l.message || 'The system clock appears to have been moved backwards. Correct the date and time, then enter a valid license key.';
+    danger = true;
+  }
+  banner.textContent = text;
+  banner.classList.toggle('danger', danger);
+  banner.classList.remove('hidden');
+}
+function showForcedPassword(currentPassword){
+  const modal = qs('#forcedPasswordModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  const form = qs('#forcedPasswordForm');
+  if (form) {
+    const current = form.querySelector('[name="current_password"]');
+    if (current && currentPassword) current.value = currentPassword;
+    const next = form.querySelector('[name="new_password"]');
+    if (next) next.focus();
+  }
 }
 function renderNav(){
   qs('#nav').innerHTML = pages.filter(p=>p[2].includes(state.user.role)).map(p=>`<button data-page="${p[0]}">${p[1]}</button>`).join('');
-  qsa('#nav button').forEach(b=>b.onclick=()=>openPage(b.dataset.page));
+  qsa('#nav button').forEach(b=>b.onclick=()=>openPage(b.dataset.page).catch(err=>toast(err.message)));
 }
 async function openPage(page){
   state.page=page; qsa('.view').forEach(v=>v.classList.add('hidden')); qs('#'+page).classList.remove('hidden');
@@ -122,11 +168,12 @@ async function openPage(page){
   if(page==='stockanalytics') await loadStockAnalytics();
   if(page==='admin') await loadAdmin();
   if(page==='reports') await loadReports();
+  if(page==='settings') await loadSettings();
 }
 function table(rows){
   if(!rows?.length) return '<p class="muted">No records yet.</p>';
   const keys = Object.keys(rows[0]).filter(k=>!String(rows[0][k]).startsWith('$2y$'));
-  return `<table><thead><tr>${keys.map(k=>`<th>${k.replaceAll('_',' ')}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${r[k]??''}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr>${keys.map(k=>`<th>${esc(k.replaceAll('_',' '))}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 async function loadDashboard(){
   const d = await api('dashboard', null, 'GET');
@@ -151,7 +198,7 @@ function renderHeldSales(rows){
   target.innerHTML = rows.map(row => {
     const cart = JSON.parse(row.cart_json || '[]');
     const itemCount = cart.reduce((total, item) => total + (+item.qty || 0), 0);
-    return `<div class="held-sale"><div><b>${row.hold_no}</b><span>${row.customer_name || 'Walk-in Customer'} · ${itemCount} item${itemCount === 1 ? '' : 's'} · ${receiptDate(row.created_at)}</span></div><button class="secondary" type="button" data-resume-hold="${row.id}">Continue</button></div>`;
+    return `<div class="held-sale"><div><b>${esc(row.hold_no)}</b><span>${esc(row.customer_name || 'Walk-in Customer')} · ${itemCount} item${itemCount === 1 ? '' : 's'} · ${esc(receiptDate(row.created_at))}</span></div><button class="secondary" type="button" data-resume-hold="${row.id}">Continue</button></div>`;
   }).join('');
   qsa('[data-resume-hold]').forEach(button => button.onclick = () => resumeHeldSale(+button.dataset.resumeHold));
 }
@@ -170,7 +217,7 @@ async function resumeHeldSale(id){
 function renderProducts(){
   const term = qs('#productSearch').value.toLowerCase();
   const rows = state.products.filter(p=>[p.sku,p.barcode,p.name,p.category].join(' ').toLowerCase().includes(term));
-  qs('#productTiles').innerHTML = rows.map(p=>`<button class="product-tile" data-id="${p.id}"><b>${p.name}</b><small>${p.sku} · ${p.barcode||'no barcode'}</small><span>${money(p.selling_price)}</span><small class="${+p.quantity<=+p.reorder_level?'stock-low':''}">Stock: ${p.quantity}</small></button>`).join('');
+  qs('#productTiles').innerHTML = rows.map(p=>`<button class="product-tile" data-id="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.sku)} · ${esc(p.barcode||'no barcode')}</small><span>${money(p.selling_price)}</span><small class="${+p.quantity<=+p.reorder_level?'stock-low':''}">Stock: ${esc(p.quantity)}</small></button>`).join('');
   qsa('.product-tile').forEach(b=>b.onclick=()=>addToCart(+b.dataset.id));
 }
 function addToCart(id){
@@ -189,7 +236,7 @@ function renderCart(){
   }
   enforceMpesaInput();
 
-  qs('#cartLines').innerHTML = state.cart.length ? state.cart.map(x=>`<div class="cart-line"><div><b>${x.name}</b><small>${money(x.price*x.qty)}</small></div><input type="number" min="1" value="${x.qty}" data-qty="${x.id}"><button data-remove="${x.id}">×</button></div>`).join('') : '<p class="muted">Scan or tap products to add them.</p>';
+  qs('#cartLines').innerHTML = state.cart.length ? state.cart.map(x=>`<div class="cart-line"><div><b>${esc(x.name)}</b><small>${money(x.price*x.qty)}</small></div><input type="number" min="1" value="${esc(x.qty)}" data-qty="${x.id}"><button data-remove="${x.id}">×</button></div>`).join('') : '<p class="muted">Scan or tap products to add them.</p>';
   qsa('[data-qty]').forEach(i=>i.onchange=()=>{state.cart.find(x=>x.id===+i.dataset.qty).qty=Math.max(1,+i.value);renderCart()});
   qsa('[data-remove]').forEach(b=>b.onclick=()=>{state.cart=state.cart.filter(x=>x.id!==+b.dataset.remove);renderCart()});
   const subtotal=state.cart.reduce((s,x)=>s+x.price*x.qty,0), discount=+qs('#discount').value||0, total=Math.max(0,subtotal-discount), vat=total*0.16/1.16, paid=+qs('#amountPaid').value||total, change = paymentMethod === 'Cash' ? Math.max(0, paid-total) : 0;
@@ -257,7 +304,7 @@ async function waitForMpesaPayment(saleId, reference, timeoutSeconds){
 }
 async function printReceipt(id){
   const r=await api(`receipt&id=${id}`, null, 'GET'), s=r.sale;
-  const items = (r.items || []).map(i=>`<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${money(i.unit_price)}</td><td>${money(i.total)}</td></tr>`).join('');
+  const items = (r.items || []).map(i=>`<tr><td>${esc(i.product_name)}</td><td>${esc(i.quantity)}</td><td>${money(i.unit_price)}</td><td>${money(i.total)}</td></tr>`).join('');
   
   // Generate QR code URL if not present
   let qrUrl = s.etims_qr_url;
@@ -268,22 +315,22 @@ async function printReceipt(id){
   const div=document.createElement('section'); div.className='receipt-print';
   div.innerHTML=`
     <div class="receipt-shell">
-      <img class="receipt-logo" src="${r.company.logo}">
-      <h2>${r.company.name}</h2>
-      <p>${r.company.location}<br>${r.company.email}</p>
+      <img class="receipt-logo" src="${esc(r.company.logo)}">
+      <h2>${esc(r.company.name)}</h2>
+      <p>${esc(r.company.location)}<br>${esc(r.company.email)}</p>
       <div class="receipt-divider"></div>
-      <p>Receipt: <b>${s.receipt_no}</b><br>${receiptDate(s.created_at)}</p>
-      <p>Cashier: <b>${s.cashier_name || state.user?.full_name || 'System'}</b><br>Customer: <b>${s.customer_name || 'Walk-in Customer'}</b></p>
+      <p>Receipt: <b>${esc(s.receipt_no)}</b><br>${esc(receiptDate(s.created_at))}</p>
+      <p>Cashier: <b>${esc(s.cashier_name || state.user?.full_name || 'System')}</b><br>Customer: <b>${esc(s.customer_name || 'Walk-in Customer')}</b></p>
       <table>
         <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead>
         <tbody>${items || '<tr><td colspan="4">No items</td></tr>'}</tbody>
       </table>
       <div class="receipt-divider"></div>
       <p>Subtotal: ${money(s.subtotal)}<br>Discount: ${money(s.discount)}<br>VAT (16%): ${money(s.tax)}<br>Total: <b>${money(s.total)}</b></p>
-      <p>Payment: <b>${s.payment_method}</b>${s.payment_method === 'M-Pesa' ? `${s.mpesa_phone ? `<br>Mobile: ${maskMpesaPhone(s.mpesa_phone)}` : ''}${s.mpesa_receipt_no ? `<br>M-Pesa Ref: ${s.mpesa_receipt_no}` : ''}<br>Status: ${s.mpesa_status || 'PAID'}` : ''}${s.payment_method === 'Cash' ? `<br>Paid: ${money(s.amount_paid)}<br>Change: ${money(s.change_due)}` : `<br>Paid: ${money(s.amount_paid)}`}</p>
+      <p>Payment: <b>${esc(s.payment_method)}</b>${s.payment_method === 'M-Pesa' ? `${s.mpesa_phone ? `<br>Mobile: ${esc(maskMpesaPhone(s.mpesa_phone))}` : ''}${s.mpesa_receipt_no ? `<br>M-Pesa Ref: ${esc(s.mpesa_receipt_no)}` : ''}<br>Status: ${esc(s.mpesa_status || 'PAID')}` : ''}${s.payment_method === 'Cash' ? `<br>Paid: ${money(s.amount_paid)}<br>Change: ${money(s.change_due)}` : `<br>Paid: ${money(s.amount_paid)}`}</p>
       <div class="receipt-divider"></div>
-      ${qrUrl ? `<div style="text-align: center; margin: 10px 0;"><img src="${qrUrl}" style="max-width: 200px; height: auto;" alt="KRA QR Code"></div>` : ''}
-      ${s.etims_unique_id ? `<p style="text-align: center; font-size: 10px;">ETIMS ID: ${s.etims_unique_id}</p>` : ''}
+      ${qrUrl ? `<div style="text-align: center; margin: 10px 0;"><img src="${esc(qrUrl)}" style="max-width: 200px; height: auto;" alt="KRA QR Code"></div>` : ''}
+      ${s.etims_unique_id ? `<p style="text-align: center; font-size: 10px;">ETIMS ID: ${esc(s.etims_unique_id)}</p>` : ''}
       <p>Thank you for shopping with SAJI Hardware.</p>
     </div>`;
   document.body.appendChild(div); window.print(); div.remove();
@@ -292,7 +339,7 @@ async function loadProducts(){
   const rows=(await api('list&table=products', null, 'GET')).rows;
   qs('#productsTable').innerHTML=table(rows);
   const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
-  qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
 }
 async function loadPeople(){
   const c=(await api('list&table=customers', null, 'GET')).rows, s=(await api('list&table=suppliers', null, 'GET')).rows;
@@ -301,7 +348,7 @@ async function loadPeople(){
 }
 function peopleTable(rows, tableName){
   if (!rows.length) return '<p class="muted">No records yet.</p>';
-  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th><th>Action</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${row.name||''}</td><td>${row.phone||''}</td><td>${row.email||''}</td><td>${row.kra_pin||''}</td><td><button class="danger" type="button" data-delete-person="${row.id}" data-table="${tableName}">Delete</button></td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th><th>Action</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.name||'')}</td><td>${esc(row.phone||'')}</td><td>${esc(row.email||'')}</td><td>${esc(row.kra_pin||'')}</td><td><button class="danger" type="button" data-delete-person="${row.id}" data-table="${esc(tableName)}">Delete</button></td></tr>`).join('')}</tbody></table>`;
 }
 async function deletePerson(table, id){
   if (!window.confirm('Delete this record permanently?')) return;
@@ -317,15 +364,15 @@ function renderQuotationHistory(rows){
   return `<table><thead><tr><th>Quotation</th><th>Customer</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows.map(row=>{
     const accepted= row.status === 'ACCEPTED';
     const converted= row.status === 'CONVERTED';
-    return `<tr><td>${row.quote_no}</td><td>${row.customer_name||''}</td><td>${money(row.total)}</td><td>${row.status}</td><td>${receiptDate(row.created_at)}</td><td><button class="secondary" type="button" data-view-quotation="${row.id}">Receipt</button> <button class="secondary" type="button" data-pdf-quotation="${row.id}">PDF</button> ${!converted && !accepted ? `<button class="secondary" type="button" data-accept-quotation="${row.id}">Accept</button>` : ''} ${accepted ? `<button class="primary" type="button" data-convert-quotation="${row.id}">Add to sales</button>` : ''} ${converted ? `<button class="secondary" type="button" data-view-sale="${row.converted_sale_id}">Sale receipt</button>` : ''} ${!converted ? `<button class="danger" type="button" data-delete-quotation="${row.id}">Delete</button>` : ''}</td></tr>`;
+    return `<tr><td>${esc(row.quote_no)}</td><td>${esc(row.customer_name||'')}</td><td>${money(row.total)}</td><td>${esc(row.status)}</td><td>${esc(receiptDate(row.created_at))}</td><td><button class="secondary" type="button" data-view-quotation="${row.id}">Receipt</button> <button class="secondary" type="button" data-pdf-quotation="${row.id}">PDF</button> ${!converted && !accepted ? `<button class="secondary" type="button" data-accept-quotation="${row.id}">Accept</button>` : ''} ${accepted ? `<button class="primary" type="button" data-convert-quotation="${row.id}">Add to sales</button>` : ''} ${converted ? `<button class="secondary" type="button" data-view-sale="${row.converted_sale_id}">Sale receipt</button>` : ''} ${!converted ? `<button class="danger" type="button" data-delete-quotation="${row.id}">Delete</button>` : ''}</td></tr>`;
   }).join('')}</tbody></table>`;
 }
 async function quotationDetail(id){ return api(`quotation_detail&id=${id}`, null, 'GET'); }
 async function printQuotation(id){
   const r=await quotationDetail(id), q=r.quotation;
-  const items=(r.items||[]).map(item=>`<tr><td>${item.product_name}</td><td>${item.quantity}</td><td>${money(item.unit_price)}</td><td>${money(item.total)}</td></tr>`).join('');
+  const items=(r.items||[]).map(item=>`<tr><td>${esc(item.product_name)}</td><td>${esc(item.quantity)}</td><td>${money(item.unit_price)}</td><td>${money(item.total)}</td></tr>`).join('');
   const div=document.createElement('section'); div.className='receipt-print';
-  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${r.company.logo}"><h2>${r.company.name}</h2><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${q.quote_no}</b><br>${receiptDate(q.created_at)}<br>Valid until: ${q.valid_until||'Not specified'}</p><p>Customer: <b>${q.customer_name||'Walk-in Customer'}</b></p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
+  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${esc(r.company.logo)}"><h2>${esc(r.company.name)}</h2><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${esc(q.quote_no)}</b><br>${esc(receiptDate(q.created_at))}<br>Valid until: ${esc(q.valid_until||'Not specified')}</p><p>Customer: <b>${esc(q.customer_name||'Walk-in Customer')}</b></p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
   const previousTitle=document.title;
   document.title=`Quotation Receipt ${q.quote_no}`;
   document.body.appendChild(div); window.print(); div.remove(); document.title=previousTitle;
@@ -346,7 +393,7 @@ async function loadCashFlow(){
   const cash=result.summary, profitable=Number(cash.net_cash)>=0;
   qs('#cashFlowCardsPage').innerHTML=`<section class="kpi">Cash sales<strong>${money(cash.cash_sales)}</strong></section><section class="kpi">Manual income<strong>${money(cash.other_income)}</strong></section><section class="kpi">Total expenses<strong>${money(cash.expenses)}</strong></section><section class="kpi">Net cash<strong>${money(cash.net_cash)}</strong><span>${profitable?'Profit':'Loss'}</span></section>`;
   const max=Math.max(1,...result.series.map(row=>Math.max(Number(row.income),Number(row.expenses))));
-  qs('#cashFlowChart').innerHTML=result.series.length ? result.series.map(row=>{const income=Number(row.income), expenses=Number(row.expenses), net=income-expenses;return `<div class="cash-flow-bar ${net<0?'loss':''}" title="Income ${money(income)} | Expenses ${money(expenses)} | ${net<0?'Loss':'Profit'} ${money(Math.abs(net))}"><b>${net<0?'Loss':'Profit'} ${money(Math.abs(net))}</b><span style="height:${Math.max(4,Math.round(Math.max(income,expenses)/max*150))}px"></span><small>${row.bucket}</small></div>`}).join('') : '<p class="muted">No cash-flow activity for this period.</p>';
+  qs('#cashFlowChart').innerHTML=result.series.length ? result.series.map(row=>{const income=Number(row.income), expenses=Number(row.expenses), net=income-expenses;return `<div class="cash-flow-bar ${net<0?'loss':''}" title="Income ${money(income)} | Expenses ${money(expenses)} | ${net<0?'Loss':'Profit'} ${money(Math.abs(net))}"><b>${net<0?'Loss':'Profit'} ${money(Math.abs(net))}</b><span style="height:${Math.max(4,Math.round(Math.max(income,expenses)/max*150))}px"></span><small>${esc(row.bucket)}</small></div>`}).join('') : '<p class="muted">No cash-flow activity for this period.</p>';
   qs('#cashFlowDate').value=date;
 }
 async function loadStockAnalytics(){
@@ -355,7 +402,7 @@ async function loadStockAnalytics(){
 }
 function renderStockAnalytics(rows){
   if(!rows.length) return '<p class="muted">No supplier-linked products yet.</p>';
-  return `<table><thead><tr><th>Supplier name</th><th>Product</th><th>Total units supplied</th><th>Units available in stock</th><th>Units sold</th><th>Remaining units</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${row.supplier_name||'Unassigned'}</td><td>${row.product||''}</td><td>${row.total_units_supplied||0}</td><td>${row.units_available_in_stock||0}</td><td>${row.units_sold||0}</td><td>${row.remaining_units||0}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Supplier name</th><th>Product</th><th>Total units supplied</th><th>Units available in stock</th><th>Units sold</th><th>Remaining units</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.supplier_name||'Unassigned')}</td><td>${esc(row.product||'')}</td><td>${esc(row.total_units_supplied||0)}</td><td>${esc(row.units_available_in_stock||0)}</td><td>${esc(row.units_sold||0)}</td><td>${esc(row.remaining_units||0)}</td></tr>`).join('')}</tbody></table>`;
 }
 async function loadAnalytics(){
   const d=await api('dashboard', null, 'GET'), etims=await api('etims_summary', null, 'GET');
@@ -364,7 +411,7 @@ async function loadAnalytics(){
 }
 function renderQuoteCart(){
   const subtotal=state.cart.reduce((sum,item)=>sum+item.price*item.qty,0), discount=+qs('#quoteDiscount').value||0, total=Math.max(0,subtotal-discount), tax=total*0.16/1.16;
-  qs('#quoteCart').innerHTML=state.cart.length ? state.cart.map(item=>`<div class="cart-line"><div><b>${item.name}</b><small>${money(item.price*item.qty)}</small></div><span>${item.qty}</span><button type="button" data-quote-remove="${item.id}">x</button></div>`).join('') : '<p class="muted">Add products from the Sales screen before saving a quotation.</p>';
+  qs('#quoteCart').innerHTML=state.cart.length ? state.cart.map(item=>`<div class="cart-line"><div><b>${esc(item.name)}</b><small>${money(item.price*item.qty)}</small></div><span>${esc(item.qty)}</span><button type="button" data-quote-remove="${item.id}">x</button></div>`).join('') : '<p class="muted">Add products from the Sales screen before saving a quotation.</p>';
   qsa('[data-quote-remove]').forEach(button=>button.onclick=()=>{state.cart=state.cart.filter(item=>item.id!==+button.dataset.quoteRemove);renderQuoteCart()});
   qs('#quoteTotals').innerHTML=`<div><span>Subtotal</span><b>${money(subtotal)}</b></div><div><span>VAT</span><b>${money(tax)}</b></div><div class="grand"><span>Total</span><b>${money(total)}</b></div>`;
 }
@@ -386,7 +433,7 @@ function renderUserAccounts(rows){
   return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Branch</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(row => {
     const active = +row.active === 1;
    const isMainAdmin = row.id === 1;
-   return `<tr><td>${row.full_name || ''}</td><td>${row.username || ''}</td><td>${row.role || ''}</td><td>${row.branch || ''}</td><td>${active ? 'Active' : 'Deactivated'}</td><td>${isMainAdmin ? '<span class="muted">Protected</span>' : `<button class="secondary" type="button" data-toggle-user="${row.id}" data-active="${active ? 1 : 0}">${active ? 'Deactivate' : 'Activate'}</button> <button class="danger" type="button" data-delete-user="${row.id}">Delete</button>`}</td></tr>`;
+   return `<tr><td>${esc(row.full_name || '')}</td><td>${esc(row.username || '')}</td><td>${esc(row.role || '')}</td><td>${esc(row.branch || '')}</td><td>${active ? 'Active' : 'Deactivated'}</td><td>${isMainAdmin ? '<span class="muted">Protected</span>' : `<button class="secondary" type="button" data-toggle-user="${row.id}" data-active="${active ? 1 : 0}">${active ? 'Deactivate' : 'Activate'}</button> <button class="danger" type="button" data-delete-user="${row.id}">Delete</button>`}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 async function setUserActive(id, active){
@@ -410,12 +457,132 @@ async function deleteUser(id){
 }
 async function loadReports(){
   const salesRows = (await api('list&table=sales', null, 'GET')).rows;
-  qs('#salesTable').innerHTML = `<table><thead><tr><th>Receipt</th><th>Customer</th><th>Method</th><th>Cashier</th><th>Total</th><th>Time</th><th>Action</th></tr></thead><tbody>${salesRows.map(r=>`<tr><td>${r.receipt_no}</td><td>${r.customer_name || 'Walk-in Customer'}</td><td>${r.payment_method}</td><td>${r.cashier_name || 'Unknown'}</td><td>${money(r.total)}</td><td>${receiptDate(r.created_at)}</td><td><button class="secondary" data-print-receipt="${r.id}">Print</button></td></tr>`).join('')}</tbody></table>`;
+  qs('#salesTable').innerHTML = `<table><thead><tr><th>Receipt</th><th>Customer</th><th>Method</th><th>Cashier</th><th>Total</th><th>Time</th><th>Action</th></tr></thead><tbody>${salesRows.map(r=>`<tr><td>${esc(r.receipt_no)}</td><td>${esc(r.customer_name || 'Walk-in Customer')}</td><td>${esc(r.payment_method)}</td><td>${esc(r.cashier_name || 'Unknown')}</td><td>${money(r.total)}</td><td>${esc(receiptDate(r.created_at))}</td><td><button class="secondary" data-print-receipt="${r.id}">Print</button></td></tr>`).join('')}</tbody></table>`;
   qsa('[data-print-receipt]').forEach(btn => btn.onclick = async () => await printReceipt(+btn.dataset.printReceipt));
   qs('#syncTable').innerHTML=table((await api('list&table=sync_queue', null, 'GET')).rows);
+  await loadBackups();
 }
 
-qs('#loginForm').onsubmit=async e=>{e.preventDefault(); try{state.user=(await api('login', formData(e.target))).user; showApp()}catch(err){toast(err.message)}};
+async function loadBackups(){
+  const target = qs('#backupsTable');
+  if (!target) return;
+  try {
+    const r = await api('backup_list', null, 'GET');
+    const rows = r.backups || [];
+    const isAdmin = state.user?.role === 'ADMIN';
+    const toggle = qs('#autoBackupToggle');
+    if (toggle) { toggle.checked = !!r.auto_enabled; toggle.disabled = !isAdmin; }
+    if (!rows.length) {
+      target.innerHTML = '<p class="muted">No backups yet.</p>';
+      return;
+    }
+    target.innerHTML = `<table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.file)}</td><td>${esc(row.label)}</td><td>${Math.round(Number(row.size)/1024)} KB</td><td>${esc(receiptDate(row.created_at))}</td><td><div class="backup-actions"><button class="secondary" type="button" data-backup-download="${esc(row.file)}">Download</button>${isAdmin ? `<button class="secondary" type="button" data-backup-restore="${esc(row.file)}">Restore</button><button class="danger" type="button" data-backup-delete="${esc(row.file)}">Delete</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
+    qsa('[data-backup-download]').forEach(btn => btn.onclick = () => { window.location.href = `../api.php?action=backup_download&file=${encodeURIComponent(btn.dataset.backupDownload)}`; });
+    qsa('[data-backup-restore]').forEach(btn => btn.onclick = () => restoreBackup(btn.dataset.backupRestore));
+    qsa('[data-backup-delete]').forEach(btn => btn.onclick = () => deleteBackup(btn.dataset.backupDelete));
+  } catch (error) {
+    target.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
+}
+async function restoreBackup(file){
+  if (!window.confirm(`Replace the live database with ${file}?\n\nA safety backup of the current data is created first.`)) return;
+  const confirmText = window.prompt('Type RESTORE to confirm:', '');
+  if (confirmText === null) return;
+  try {
+    await api('backup_restore', {file, confirm: confirmText});
+    toast('Backup restored. Reloading…');
+    setTimeout(() => location.reload(), 1200);
+  } catch (error) { toast(error.message); }
+}
+async function deleteBackup(file){
+  if (!window.confirm(`Delete ${file}? This cannot be undone.`)) return;
+  try { await api('backup_delete', {file}); await loadBackups(); toast('Backup deleted'); }
+  catch (error) { toast(error.message); }
+}
+
+async function loadSettings(){
+  const isAdmin = state.user?.role === 'ADMIN';
+  qs('#activateLicenseBtn')?.classList.toggle('hidden', !isAdmin);
+  qs('#deactivateLicenseBtn')?.classList.toggle('hidden', !isAdmin);
+  qs('#licenseKeyInput')?.classList.toggle('hidden', !isAdmin);
+  renderLicensePanel();
+  try {
+    const r = await api('license_status', null, 'GET');
+    state.license = r.license || state.license;
+  } catch (error) { /* keep last known status */ }
+  renderLicensePanel();
+  renderLicenseBanner();
+}
+function renderLicensePanel(){
+  const target = qs('#licenseStatus');
+  if (!target) return;
+  const l = state.license;
+  if (!l) { target.innerHTML = '<span class="muted">License status unavailable.</span>'; return; }
+  let expires = '—';
+  if (l.expires_at) expires = receiptDate(l.expires_at);
+  else if (l.state === 'trial' || l.state === 'trial_expired') {
+    expires = l.trial_ends_at ? `Trial ends ${receiptDate(l.trial_ends_at)}` : '—';
+  } else if (l.state === 'active') {
+    expires = 'Perpetual';
+  }
+  const rows = [
+    ['Status', l.state],
+    ['Plan', l.plan || 'trial'],
+    ['Customer', l.customer || '—'],
+    ['Expires', expires],
+    ['Days left', String(l.days_left || 0)],
+    ['Machine ID', l.machine_id || '—'],
+  ];
+  if (l.message) rows.push(['Note', l.message]);
+  target.innerHTML = rows.map(([k,v]) => `<div><span class="muted">${esc(k)}</span> ${esc(v)}</div>`).join('');
+}
+
+qs('#loginForm').onsubmit=async e=>{
+  e.preventDefault();
+  const credentials = formData(e.target);
+  try{
+    const result = await api('login', credentials);
+    csrfToken = result.csrf || csrfToken;
+    state.user = result.user;
+    state.license = result.license || state.license;
+    showApp();
+    if (result.must_change_password) showForcedPassword(credentials.password);
+  }catch(err){toast(err.message)}
+};
+qs('#forcedPasswordForm').onsubmit=async e=>{
+  e.preventDefault();
+  try{
+    await api('change_password', formData(e.target));
+    qs('#forcedPasswordModal').classList.add('hidden');
+    e.target.reset();
+    toast('Password updated');
+  }catch(err){toast(err.message)}
+};
+qs('#activateLicenseBtn').onclick=async()=>{
+  const key = qs('#licenseKeyInput').value.trim();
+  if (!key) return toast('Paste a license key first');
+  try{
+    const r = await api('license_activate', {key});
+    state.license = r.license;
+    qs('#licenseKeyInput').value = '';
+    renderLicensePanel(); renderLicenseBanner(); toast('License activated');
+  }catch(err){toast(err.message)}
+};
+qs('#deactivateLicenseBtn').onclick=async()=>{
+  if (!window.confirm('Remove the license from this installation?')) return;
+  try{
+    const r = await api('license_deactivate', {});
+    state.license = r.license;
+    renderLicensePanel(); renderLicenseBanner(); toast('License removed');
+  }catch(err){toast(err.message)}
+};
+qs('#backupRefreshBtn').onclick=()=>loadBackups().catch(error=>toast(error.message));
+qs('#autoBackupToggle').onchange=async e=>{
+  try{
+    await api('save_settings', {backup_auto_enabled: e.target.checked ? 1 : 0});
+    toast(e.target.checked ? 'Automatic backups enabled' : 'Automatic backups disabled');
+  }catch(error){ e.target.checked = !e.target.checked; toast(error.message); }
+};
 qs('#logoutBtn').onclick=async()=>{await api('logout'); location.reload()};
 qs('#cancelPaymentBtn').onclick=()=>{hidePaymentLoading(); toast('M-Pesa payment canceled. You can retry from the same sale.');};
 qs('#paymentMethod').onchange = renderCart;

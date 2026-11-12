@@ -8,6 +8,7 @@ header('Content-Type: application/json');
 
 try {
     require_payment_user();
+    security_require_csrf();
     if (!kcb_configured()) {
         payment_json(['error' => 'KCB Buni is not configured in api/config.php.'], 503);
     }

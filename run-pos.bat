@@ -27,12 +27,26 @@ if not exist "%PHP_DIR%\ext\php_sqlite3.dll" (
   echo extension_dir="%PHP_DIR%\ext"
   echo extension=pdo_sqlite
   echo extension=sqlite3
+  echo extension=openssl
+  echo extension=curl
+  echo extension=mbstring
+  echo extension=sodium
+  echo extension=gd
+  echo extension=fileinfo
+  echo extension=zip
+  echo opcache.enable=0
+  echo opcache.enable_cli=0
   echo date.timezone=Africa/Nairobi
+  echo session.name=SAJIPOSID
   echo session.use_strict_mode=1
   echo session.cookie_httponly=1
   echo session.cookie_samesite=Lax
-  echo display_errors=1
+  echo display_errors=0
+  echo log_errors=1
   echo error_reporting=E_ALL
 ) > php-runtime.ini
 
-"%PHP_EXE%" -c "%~dp0php-runtime.ini" -S localhost:8000 router.php
+rem Always use php.exe: php-win.exe cannot host PHP's built-in web server.
+start "SAJI POS Server" /min "%PHP_EXE%" -c "%~dp0php-runtime.ini" -S 127.0.0.1:8000 router.php
+timeout /t 2 /nobreak >nul
+start "" "http://127.0.0.1:8000"

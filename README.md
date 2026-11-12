@@ -15,6 +15,34 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 - Atomic checkout transaction so stock and sale records are not partially saved.
 - KCB Buni STK Push payment folder with MySQL payment records, callback signature validation, and pending-payment states.
 
+## Licensing, Security And Backups (Phase 1)
+
+- **Licensing**: 14-day local trial, then activate with an offline signed key.
+  The public key ships in `config.php`; the private signing key stays in
+  `tools/keys/` and must never be copied to a customer machine.
+- **Hybrid check-in (optional)**: set `LICENSE_SERVER_URL` in `.env` to enable a
+  daily best-effort revocation check. Leave it blank for fully offline use.
+- **Security**: CSRF protection on every mutating API call, login throttling,
+  forced password change for default/temporary passwords, Content-Security-Policy
+  and hardening headers, and server-side error logging in `data/logs/app.log`.
+- **Backups**: automatic daily backup on first authenticated request, plus manual
+  create/download/restore/delete from Reports & Backups. Restores keep a
+  `pre_restore` safety copy first.
+- **Portable build**: `powershell -ExecutionPolicy Bypass -File packaging\build-portable.ps1`
+  creates `dist/SAJI-POS-<version>.zip` plus `dist/SHA256SUMS.txt`. Add `-BundlePhp`
+  to produce `dist/SAJI-POS-<version>-with-php.zip` that includes the local PHP
+  runtime. The signed `.exe` installer is the next packaging step (Phase 1.5).
+
+### Issue a license
+
+```powershell
+php -c .\php-runtime.ini tools\make_license.php keygen
+php -c .\php-runtime.ini tools\make_license.php issue --customer="Shop Name" --pin=P051234567X --plan=standard --days=365
+```
+
+Paste the printed key into **Settings → License**. `keygen` is run once; keep
+`tools/keys/private.key` secret and out of the packaged build.
+
 ## Default Login
 
 ```text
@@ -22,7 +50,8 @@ Username: admin
 Password: admin123
 ```
 
-Change this in Settings before real use.
+The app now forces a password change on first login. Set a new password of at
+least 10 characters in Settings before real use.
 
 ## Run Locally
 

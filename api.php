@@ -2,18 +2,33 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/lib/security.php';
+require_once __DIR__ . '/lib/license.php';
 
+$isHttps = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+    || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
 session_set_cookie_params([
     'lifetime' => 1800,
     'path' => '/',
-    'secure' => false,
+    'secure' => $isHttps,
     'httponly' => true,
     'samesite' => 'Lax',
 ]);
 session_start();
-init_db();
+security_send_headers();
 
 $action = $_GET['action'] ?? '';
+
+// The health probe runs every few seconds from the browser; skip DB setup for it.
+if ($action !== 'health') {
+    init_db();
+}
+
+// Every mutating request needs the session CSRF token. Login is exempt because
+// no authenticated token exists until the login response creates one.
+if ($action !== 'login') {
+    security_require_csrf();
+}
 
 if (isset($_SESSION['user'])) {
     $lastSeen = (int)($_SESSION['last_seen'] ?? 0);
@@ -28,23 +43,74 @@ if (isset($_SESSION['user'])) {
 
 try {
     if ($action === 'login') {
+        security_check_origin();
         $data = input_json();
+        $username = trim((string)($data['username'] ?? ''));
+        $ip = security_client_ip();
+        $lockedSeconds = security_login_lock_seconds($username, $ip);
+        if ($lockedSeconds > 0) {
+            json_response([
+                'error' => 'Too many failed attempts. Try again in ' . (int)ceil($lockedSeconds / 60) . ' minute(s).',
+                'code' => 'LOCKED',
+            ], 429);
+        }
         $stmt = db()->prepare('SELECT * FROM users WHERE username = ? AND active = 1');
-        $stmt->execute([trim($data['username'] ?? '')]);
+        $stmt->execute([$username]);
         $user = $stmt->fetch();
-        if (!$user || !verify_password_local((string)($data['password'] ?? ''), $user['password_hash'])) {
+        $password = (string)($data['password'] ?? '');
+        if (!$user || !verify_password_local($password, $user['password_hash'])) {
+            security_record_login($username, $ip, false);
             json_response(['error' => 'Invalid username or password'], 401);
         }
+        security_record_login($username, $ip, true);
+
+        $mustChange = (int)($user['must_change_password'] ?? 0) === 1;
+        if (!$mustChange && $password === 'admin123') {
+            db()->prepare('UPDATE users SET must_change_password = 1 WHERE id = ?')->execute([$user['id']]);
+            $mustChange = true;
+        }
+
+        // Prevent session fixation: issue a new ID once credentials are verified.
+        session_regenerate_id(true);
         $_SESSION['user'] = ['id' => $user['id'], 'username' => $user['username'], 'full_name' => $user['full_name'], 'role' => $user['role'], 'branch' => $user['branch']];
+        $_SESSION['last_seen'] = time();
         audit($user['username'], 'LOGIN');
-        json_response(['user' => $_SESSION['user']]);
+        json_response([
+            'user' => $_SESSION['user'],
+            'must_change_password' => $mustChange,
+            'csrf' => security_csrf_token(),
+            'license' => license_status(),
+            'version' => APP_VERSION,
+        ]);
     }
     if ($action === 'logout') {
         session_destroy();
         json_response(['ok' => true]);
     }
     if ($action === 'me') {
-        json_response(['user' => $_SESSION['user'] ?? null, 'company' => ['name' => COMPANY_NAME, 'email' => COMPANY_EMAIL, 'location' => COMPANY_LOCATION, 'logo' => LOGO_WEB_PATH]]);
+        $me = session_current_user();
+        $mustChange = false;
+        if ($me) {
+            try {
+                license_checkin();
+                $mustChange = user_must_change_password((int)$me['id']);
+            } catch (Throwable $e) {
+                app_log('Session check error: ' . $e->getMessage());
+            }
+        }
+        json_response([
+            'user' => $me,
+            'company' => [
+                'name' => settings_get('company_name', COMPANY_NAME),
+                'email' => settings_get('company_email', COMPANY_EMAIL),
+                'location' => settings_get('company_location', COMPANY_LOCATION),
+                'logo' => LOGO_WEB_PATH,
+            ],
+            'csrf' => security_csrf_token(),
+            'license' => license_status(),
+            'version' => APP_VERSION,
+            'must_change_password' => $mustChange,
+        ]);
     }
 
     if ($action === 'health') {
@@ -52,6 +118,44 @@ try {
     }
 
     $user = require_login();
+
+    // Safety net: keep taking automatic backups even if the license has lapsed.
+    backup_auto_maybe();
+
+    // Force a password change at the API level, not just in the UI.
+    if (user_must_change_password((int)$user['id']) && $action !== 'change_password') {
+        json_response([
+            'error' => 'Change your password before using the application.',
+            'code' => 'PASSWORD_CHANGE_REQUIRED',
+        ], 403);
+    }
+
+    // Actions that must remain reachable while unlicensed so an admin can activate.
+    $licenseExempt = ['license_status', 'license_activate', 'license_deactivate', 'change_password', 'backup', 'backup_list', 'backup_download', 'backup_delete', 'backup_restore'];
+    if (!in_array($action, $licenseExempt, true)) {
+        license_require();
+    }
+
+    if ($action === 'license_status') {
+        json_response(['license' => license_status(), 'version' => APP_VERSION]);
+    }
+
+    if ($action === 'license_activate') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        try {
+            $status = license_activate((string)($d['key'] ?? ''));
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response(['ok' => true, 'license' => $status]);
+    }
+
+    if ($action === 'license_deactivate') {
+        require_role(['ADMIN']);
+        license_deactivate();
+        json_response(['ok' => true, 'license' => license_status()]);
+    }
 
     if ($action === 'dashboard') {
         $pdo = db();
@@ -342,11 +446,11 @@ try {
     if ($action === 'create_user') {
         require_role(['ADMIN']);
         $d = input_json();
-        if (strlen((string)$d['password']) < 6) {
-            json_response(['error' => 'Password must be at least 6 characters'], 400);
+        if (strlen((string)($d['password'] ?? '')) < 10) {
+            json_response(['error' => 'Password must be at least 10 characters'], 400);
         }
-        db()->prepare('INSERT INTO users(username, full_name, password_hash, role, branch) VALUES(?,?,?,?,?)')
-            ->execute([$d['username'], $d['full_name'], hash_password_local($d['password']), $d['role'], $d['branch'] ?? 'Main']);
+        db()->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,1)')
+            ->execute([$d['username'], $d['full_name'], hash_password_local((string)$d['password']), $d['role'], $d['branch'] ?? 'Main']);
         audit($user['username'], 'CREATE_USER', $d['username']);
         json_response(['ok' => true]);
     }
@@ -406,10 +510,18 @@ try {
         $stmt = db()->prepare('SELECT password_hash FROM users WHERE id = ?');
         $stmt->execute([$user['id']]);
         $row = $stmt->fetch();
-        if (!$row || !verify_password_local($d['current_password'] ?? '', $row['password_hash'])) {
+        if (!$row || !verify_password_local((string)($d['current_password'] ?? ''), $row['password_hash'])) {
             json_response(['error' => 'Current password is incorrect'], 400);
         }
-        db()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([hash_password_local($d['new_password']), $user['id']]);
+        $newPassword = (string)($d['new_password'] ?? '');
+        if (strlen($newPassword) < 10) {
+            json_response(['error' => 'New password must be at least 10 characters'], 400);
+        }
+        if ($newPassword === 'admin123') {
+            json_response(['error' => 'Choose a password other than the default'], 400);
+        }
+        db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
+            ->execute([hash_password_local($newPassword), $user['id']]);
         audit($user['username'], 'CHANGE_PASSWORD');
         json_response(['ok' => true]);
     }
@@ -569,8 +681,70 @@ try {
     if ($action === 'backup') {
         require_role(['ADMIN','MANAGER']);
         $file = create_backup('manual');
+        settings_set('backup_last_at', gmdate('c'));
         audit($user['username'], 'BACKUP', basename($file));
-        json_response(['ok' => true, 'file' => $file]);
+        json_response(['ok' => true, 'file' => basename($file)]);
+    }
+
+    if ($action === 'backup_list') {
+        require_role(['ADMIN','MANAGER']);
+        json_response([
+            'backups' => backup_list(),
+            'auto_enabled' => (string)(settings_get('backup_auto_enabled', '1') ?? '1') === '1',
+            'keep' => (int)(settings_get('backup_keep', '30') ?? 30),
+        ]);
+    }
+
+    if ($action === 'save_settings') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        $allowed = ['backup_auto_enabled', 'backup_keep'];
+        foreach ($allowed as $key) {
+            if (array_key_exists($key, $d)) {
+                $value = (string)$d[$key];
+                if ($key === 'backup_auto_enabled') {
+                    $value = in_array($value, ['1', 'true', 'on'], true) ? '1' : '0';
+                }
+                if ($key === 'backup_keep') {
+                    $value = (string)max(1, min(365, (int)$value));
+                }
+                settings_set($key, $value);
+            }
+        }
+        audit($user['username'], 'SAVE_SETTINGS', implode(',', $allowed));
+        json_response(['ok' => true]);
+    }
+
+    if ($action === 'backup_download') {
+        require_role(['ADMIN','MANAGER']);
+        $path = backup_path_for((string)($_GET['file'] ?? ''));
+        audit($user['username'], 'BACKUP_DOWNLOAD', basename($path));
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($path) . '"');
+        header('Content-Length: ' . (string)filesize($path));
+        readfile($path);
+        exit;
+    }
+
+    if ($action === 'backup_delete') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        $path = backup_path_for((string)($d['file'] ?? ''));
+        unlink($path);
+        audit($user['username'], 'BACKUP_DELETE', basename($path));
+        json_response(['ok' => true]);
+    }
+
+    if ($action === 'backup_restore') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        if (strtoupper(trim((string)($d['confirm'] ?? ''))) !== 'RESTORE') {
+            json_response(['error' => 'Type RESTORE to confirm this action'], 400);
+        }
+        $name = (string)($d['file'] ?? '');
+        $safety = backup_restore($name);
+        audit($user['username'], 'BACKUP_RESTORE', basename($name));
+        json_response(['ok' => true, 'safety_backup' => basename($safety)]);
     }
 
     if ($action === 'retry_sync') {
@@ -581,8 +755,20 @@ try {
 
     json_response(['error' => 'Unknown action'], 404);
 } catch (Throwable $e) {
-    if (db()->inTransaction()) {
-        db()->rollBack();
+    app_log('API error [' . $action . ']: ' . get_class($e) . ': ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    try {
+        if (db()->inTransaction()) {
+            db()->rollBack();
+        }
+    } catch (Throwable $rollbackError) {
+        app_log('Rollback failed: ' . $rollbackError->getMessage());
     }
-    json_response(['error' => $e->getMessage()], 500);
+    $isValidationError = $e instanceof InvalidArgumentException;
+    // PDOException extends RuntimeException, but its messages can contain SQL,
+    // file paths and column names. Only application-level messages are safe.
+    $isSafeMessage = $isValidationError || ($e instanceof RuntimeException && !$e instanceof PDOException);
+    json_response([
+        'error' => $isSafeMessage ? $e->getMessage() : 'An unexpected error occurred. Check the application log.',
+        'code' => $isValidationError ? 'VALIDATION_ERROR' : 'SERVER_ERROR',
+    ], $isValidationError ? 400 : 500);
 }

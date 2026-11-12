@@ -9,6 +9,10 @@ data/backups/*
 kcb-buni-app/data/*.sqlite*
 kcb-buni-app/data/backups/*
 
+# License signing keys and runtime logs (never commit)
+tools/keys/
+data/logs/
+
 # Runtime and debug output
 *.log
 tmp_*debug*.php
@@ -19,3 +23,7 @@ debug_credentials.php
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Test artifacts and build output
+tests/issued_license.txt
+dist/

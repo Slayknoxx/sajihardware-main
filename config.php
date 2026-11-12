@@ -32,6 +32,11 @@ if (!function_exists('env_value')) {
                 if (($envValue[0] ?? '') === "'" && str_ends_with($envValue, "'")) {
                     $envValue = substr($envValue, 1, -1);
                 }
+                // A blank entry (for example "LICENSE_PUBLIC_KEY=") must not
+                // override the built-in default; treat it as unset.
+                if (trim($envValue) === '') {
+                    continue;
+                }
                 return $envValue;
             }
         }
@@ -57,15 +62,17 @@ if (!function_exists('env_int')) {
 }
 
 define('APP_NAME', 'SAJI HARDWARE POS');
+define('APP_VERSION', '1.1.0');
 define('COMPANY_NAME', 'SAJI HARDWARE LTD');
 define('COMPANY_EMAIL', 'sajihardwareltd@gmail.com');
 define('COMPANY_LOCATION', 'Kanduyi - Webuye Road');
 define('VAT_RATE', 0.16);
 
 define('BASE_PATH', __DIR__);
-define('DATA_PATH', BASE_PATH . DIRECTORY_SEPARATOR . 'data');
-define('DB_PATH', DATA_PATH . DIRECTORY_SEPARATOR . 'saji_pos.sqlite3');
-define('BACKUP_PATH', DATA_PATH . DIRECTORY_SEPARATOR . 'backups');
+// These overrides exist so tests can run against an isolated copy of the data.
+define('DATA_PATH', (string)env_value('SAJI_DATA_PATH', BASE_PATH . DIRECTORY_SEPARATOR . 'data'));
+define('DB_PATH', DATA_PATH . DIRECTORY_SEPARATOR . (string)env_value('SAJI_DB_FILE', 'saji_pos.sqlite3'));
+define('BACKUP_PATH', (string)env_value('SAJI_BACKUP_PATH', DATA_PATH . DIRECTORY_SEPARATOR . 'backups'));
 define('LOGO_WEB_PATH', 'assets/saji-logo.png');
 
 define('ETIMS_ENABLED', env_bool('ETIMS_ENABLED', true));
@@ -78,6 +85,15 @@ define('ETIMS_SANDBOX', env_bool('ETIMS_SANDBOX', false));
 define('ENABLE_RECEIPT_ENCRYPTION', true);
 define('ENABLE_RECEIPT_SIGNING', true);
 define('RECEIPT_SIGNATURE_ALGORITHM', 'sha256');
+
+// Licensing. Leave LICENSE_PUBLIC_KEY empty to run in unlicensed/trial mode only.
+// Populate it from tools/make_license.php keygen (the base64 public key, never the private one).
+define('LICENSE_PUBLIC_KEY', env_value('LICENSE_PUBLIC_KEY', 'I34vXob5ZwBGtG2DNea9dZAZRraAenO8FusuVJvZrM0='));
+define('LICENSE_TRIAL_DAYS', env_int('LICENSE_TRIAL_DAYS', 14));
+define('LICENSE_GRACE_DAYS', env_int('LICENSE_GRACE_DAYS', 7));
+// Optional hybrid check-in server. When empty the app works fully offline.
+define('LICENSE_SERVER_URL', env_value('LICENSE_SERVER_URL', ''));
+define('LICENSE_CHECKIN_HOURS', env_int('LICENSE_CHECKIN_HOURS', 24));
 
 define('ETIMS_CONFIG', [
     'enabled' => ETIMS_ENABLED,

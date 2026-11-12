@@ -32,6 +32,11 @@ if (!function_exists('env_value')) {
                 if (($envValue[0] ?? '') === "'" && str_ends_with($envValue, "'")) {
                     $envValue = substr($envValue, 1, -1);
                 }
+                // A blank entry (for example "LICENSE_PUBLIC_KEY=") must not
+                // override the built-in default; treat it as unset.
+                if (trim($envValue) === '') {
+                    continue;
+                }
                 return $envValue;
             }
         }

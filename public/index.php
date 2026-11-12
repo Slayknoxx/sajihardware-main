@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../lib.php';
+require_once __DIR__ . '/../lib/security.php';
 init_db();
+security_send_headers();
 ?>
 <!doctype html>
 <html lang="en">
@@ -29,6 +31,7 @@ init_db();
         <button id="logoutBtn" class="ghost">Sign out</button>
     </aside>
     <section class="workspace">
+        <div id="licenseBanner" class="license-banner hidden"></div>
         <header class="topbar">
             <div>
                 <h1 id="pageTitle">Dashboard</h1>
@@ -161,15 +164,42 @@ init_db();
                 <section class="panel"><h2>Sales history</h2><div id="salesTable" class="table-wrap"></div></section>
                 <section class="panel"><h2>Reliability</h2><button id="backupBtn" class="primary">Create backup</button><button id="retryBtn" class="secondary">Retry sync queue</button><div id="syncTable"></div></section>
             </div>
+            <section class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>Backups</h2><span class="muted">Automatic daily backup, manual backup, restore and download</span></div>
+                <div class="toolbar">
+                    <label class="inline-check"><input id="autoBackupToggle" type="checkbox"> Automatic daily backup</label>
+                    <button id="backupRefreshBtn" class="secondary" type="button">Refresh</button>
+                </div>
+                <div id="backupsTable" class="table-wrap"></div>
+            </section>
         </section>
 
         <section id="settings" class="view hidden">
-            <form id="passwordForm" class="panel settings-panel"><h2>Change password</h2><input name="current_password" type="password" placeholder="Current password"><input name="new_password" type="password" placeholder="New password"><button class="primary">Update password</button></form>
+            <form id="passwordForm" class="panel settings-panel"><h2>Change password</h2><input name="current_password" type="password" placeholder="Current password"><input name="new_password" type="password" placeholder="New password (min 10 characters)" minlength="10"><button class="primary">Update password</button></form>
+            <section id="licensePanel" class="panel settings-panel" style="margin-top:16px">
+                <h2>License</h2>
+                <div id="licenseStatus" class="license-status">Loading…</div>
+                <p class="muted">Paste the license key supplied by your vendor. The key is verified offline against the app's public key.</p>
+                <textarea id="licenseKeyInput" rows="4" placeholder="Paste license key here"></textarea>
+                <div class="button-row">
+                    <button id="activateLicenseBtn" class="primary" type="button">Activate license</button>
+                    <button id="deactivateLicenseBtn" class="secondary" type="button">Remove license</button>
+                </div>
+            </section>
         </section>
     </section>
 </section>
 
 <div id="toast"></div>
+<div id="forcedPasswordModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="forcedPasswordForm" class="payment-loading-panel stack">
+        <h3>Set a new password</h3>
+        <p class="muted">You must change the default or temporary password before continuing.</p>
+        <input name="current_password" type="password" placeholder="Current password" autocomplete="current-password" required>
+        <input name="new_password" type="password" placeholder="New password (min 10 characters)" autocomplete="new-password" minlength="10" required>
+        <button class="primary">Update password</button>
+    </form>
+</div>
 <div id="paymentLoadingModal" class="hidden payment-loading-backdrop" aria-live="polite">
     <div class="payment-loading-panel">
         <div class="spinner"></div>

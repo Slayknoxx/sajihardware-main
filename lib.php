@@ -172,11 +172,15 @@ final class SqliteDb
     }
 }
 
+final class DbHolder
+{
+    public static PDO|SqliteDb|null $connection = null;
+}
+
 function db(): PDO|SqliteDb
 {
-    static $connection = null;
-    if ($connection instanceof PDO || $connection instanceof SqliteDb) {
-        return $connection;
+    if (DbHolder::$connection instanceof PDO || DbHolder::$connection instanceof SqliteDb) {
+        return DbHolder::$connection;
     }
     if (!is_dir(DATA_PATH)) {
         mkdir(DATA_PATH, 0775, true);
@@ -185,19 +189,111 @@ function db(): PDO|SqliteDb
         mkdir(BACKUP_PATH, 0775, true);
     }
     if (class_exists('PDO') && in_array('sqlite', PDO::getAvailableDrivers(), true)) {
-        $connection = new PDO('sqlite:' . DB_PATH);
-        $connection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $connection->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-        $connection->exec('PRAGMA foreign_keys = ON');
-        $connection->exec('PRAGMA journal_mode = WAL');
-        $connection->exec('PRAGMA busy_timeout = 5000');
-        return $connection;
+        DbHolder::$connection = new PDO('sqlite:' . DB_PATH);
+        DbHolder::$connection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        DbHolder::$connection->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        DbHolder::$connection->exec('PRAGMA foreign_keys = ON');
+        DbHolder::$connection->exec('PRAGMA journal_mode = WAL');
+        DbHolder::$connection->exec('PRAGMA busy_timeout = 5000');
+        return DbHolder::$connection;
     }
     if (class_exists('SQLite3')) {
-        $connection = new SqliteDb(DB_PATH);
-        return $connection;
+        DbHolder::$connection = new SqliteDb(DB_PATH);
+        return DbHolder::$connection;
     }
     throw new RuntimeException('SQLite is not enabled in PHP. Enable pdo_sqlite or sqlite3 in php.ini, then restart the PHP server.');
+}
+
+/**
+ * Release the current connection so the database file can be replaced (used by restore).
+ */
+function db_close(): void
+{
+    DbHolder::$connection = null;
+}
+
+/**
+ * Read every application setting as a key => value map.
+ */
+function settings_all(): array
+{
+    $rows = db()->query('SELECT key, value FROM app_settings')->fetchAll();
+    $settings = [];
+    foreach ($rows as $row) {
+        $settings[(string)$row['key']] = (string)$row['value'];
+    }
+    return $settings;
+}
+
+function settings_get(string $key, ?string $default = null): ?string
+{
+    $stmt = db()->prepare('SELECT value FROM app_settings WHERE key = ?');
+    $stmt->execute([$key]);
+    $value = $stmt->fetchColumn();
+    return $value === false || $value === null ? $default : (string)$value;
+}
+
+function settings_set(string $key, string $value): void
+{
+    $stmt = db()->prepare('INSERT INTO app_settings(key, value, updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP');
+    $stmt->execute([$key, $value]);
+}
+
+function settings_forget(string $key): void
+{
+    db()->prepare('DELETE FROM app_settings WHERE key = ?')->execute([$key]);
+}
+
+/**
+ * Seed defaults once so licensing, branding and backups have stable values.
+ */
+function settings_seed(): void
+{
+    $defaults = [
+        'company_name' => COMPANY_NAME,
+        'company_email' => COMPANY_EMAIL,
+        'company_location' => COMPANY_LOCATION,
+        'vat_rate' => (string)VAT_RATE,
+        'license_key' => '',
+        'license_revoked' => '0',
+        'license_last_checkin' => '',
+        'license_last_seen_at' => '',
+        'license_clock_tampered' => '0',
+        'backup_auto_enabled' => '1',
+        'backup_keep' => '30',
+        'backup_last_at' => '',
+    ];
+    foreach ($defaults as $key => $value) {
+        if (settings_get($key) === null) {
+            settings_set($key, $value);
+        }
+    }
+    if (settings_get('install_id') === null) {
+        settings_set('install_id', bin2hex(random_bytes(16)));
+    }
+    if (settings_get('trial_started_at') === null) {
+        settings_set('trial_started_at', gmdate('c'));
+    }
+}
+
+/**
+ * Append a line to data/logs/app.log without ever throwing.
+ */
+function app_log(string $message, bool $sensitive = false): void
+{
+    try {
+        $dir = DATA_PATH . DIRECTORY_SEPARATOR . 'logs';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+        $line = '[' . gmdate('Y-m-d H:i:s') . ' UTC] ' . $message . PHP_EOL;
+        file_put_contents($dir . DIRECTORY_SEPARATOR . 'app.log', $line, FILE_APPEND | LOCK_EX);
+    } catch (Throwable $e) {
+        if (!$sensitive) {
+            error_log($message);
+        }
+    }
 }
 
 function hash_password_local(string $password): string
@@ -460,6 +556,25 @@ function init_db(): void
         );
     ");
 
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL DEFAULT '',
+            success INTEGER NOT NULL DEFAULT 0,
+            attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username, ip, attempted_at);
+    ");
+
+    ensure_table_columns('users', [
+        'must_change_password' => 'INTEGER NOT NULL DEFAULT 0',
+    ]);
     ensure_table_columns('sales', [
         'cashier_name' => 'TEXT NOT NULL DEFAULT ""',
         'mpesa_phone' => 'TEXT NOT NULL DEFAULT ""',
@@ -495,8 +610,10 @@ function init_db(): void
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_reference ON payment_events(provider_reference) WHERE provider_reference != ""');
     $pdo->exec('UPDATE products SET supplied_quantity = quantity + COALESCE((SELECT SUM(quantity) FROM sale_items WHERE sale_items.product_id = products.id), 0) WHERE supplied_quantity = 0');
 
+    settings_seed();
+
     if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() === 0) {
-        $stmt = $pdo->prepare('INSERT INTO users(username, full_name, password_hash, role, branch) VALUES(?,?,?,?,?)');
+        $stmt = $pdo->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,1)');
         $stmt->execute(['admin', 'System Administrator', hash_password_local('admin123'), 'ADMIN', 'Main']);
     }
     if ((int)$pdo->query('SELECT COUNT(*) FROM branches')->fetchColumn() === 0) {
@@ -518,15 +635,64 @@ function init_db(): void
     }
 }
 
-function require_login(): array
+function user_must_change_password(int $userId): bool
+{
+    $stmt = db()->prepare('SELECT must_change_password FROM users WHERE id = ?');
+    $stmt->execute([$userId]);
+    return (int)($stmt->fetchColumn() ?: 0) === 1;
+}
+
+/**
+ * Return the logged-in user, refreshed against the database.
+ *
+ * The session only stores an id; the account is re-read on every request so a
+ * deleted/deactivated user, a changed role, or a database restored from a
+ * different snapshot cannot keep using an old session cookie. Returns null when
+ * the session is missing or no longer maps to an active account.
+ */
+function session_current_user(): ?array
 {
     if (session_status() !== PHP_SESSION_ACTIVE) {
         session_start();
     }
-    if (empty($_SESSION['user'])) {
+    $sessionUser = $_SESSION['user'] ?? null;
+    if (!is_array($sessionUser) || empty($sessionUser['id'])) {
+        return null;
+    }
+
+    $stmt = db()->prepare('SELECT id, username, full_name, role, branch FROM users WHERE id = ? AND active = 1');
+    $stmt->execute([(int)$sessionUser['id']]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        $_SESSION = [];
+        return null;
+    }
+
+    // Guard against id reuse after a restore: the stored username must still
+    // identify the same account.
+    if ((string)($sessionUser['username'] ?? '') !== (string)$row['username']) {
+        $_SESSION = [];
+        return null;
+    }
+
+    $user = [
+        'id' => (int)$row['id'],
+        'username' => (string)$row['username'],
+        'full_name' => (string)$row['full_name'],
+        'role' => (string)$row['role'],
+        'branch' => (string)$row['branch'],
+    ];
+    $_SESSION['user'] = $user;
+    return $user;
+}
+
+function require_login(): array
+{
+    $user = session_current_user();
+    if ($user === null) {
         json_response(['error' => 'Authentication required'], 401);
     }
-    return $_SESSION['user'];
+    return $user;
 }
 
 function require_role(array $roles): array
@@ -619,6 +785,153 @@ function create_backup(string $label = 'manual'): string
     $backup->close();
     $source->close();
     return $file;
+}
+
+function backup_path_for(string $name): string
+{
+    $name = basename(trim($name));
+    if (!preg_match('/^backup_[A-Za-z0-9_-]+\.sqlite3$/', $name)) {
+        throw new InvalidArgumentException('Invalid backup file name');
+    }
+    $path = BACKUP_PATH . DIRECTORY_SEPARATOR . $name;
+    $realPath = realpath($path);
+    $realDir = realpath(BACKUP_PATH);
+    if ($realPath === false || $realDir === false) {
+        throw new InvalidArgumentException('Backup file not found');
+    }
+    $normalizedPath = strtolower(str_replace('/', '\\', $realPath));
+    $normalizedDir = strtolower(rtrim(str_replace('/', '\\', $realDir), '\\')) . '\\';
+    if (!str_starts_with($normalizedPath, $normalizedDir)) {
+        throw new InvalidArgumentException('Backup file is outside the backup folder');
+    }
+    return $realPath;
+}
+
+function backup_list(): array
+{
+    if (!is_dir(BACKUP_PATH)) {
+        return [];
+    }
+    $files = glob(BACKUP_PATH . DIRECTORY_SEPARATOR . 'backup_*.sqlite3') ?: [];
+    $rows = [];
+    foreach ($files as $file) {
+        $name = basename($file);
+        $label = 'manual';
+        if (preg_match('/^backup_([A-Za-z0-9_-]+?)_\d{8}_\d{6}\.sqlite3$/', $name, $m)) {
+            $label = $m[1];
+        }
+        $rows[] = [
+            'file' => $name,
+            'label' => $label,
+            'size' => is_file($file) ? (int)filesize($file) : 0,
+            'created_at' => is_file($file) ? date(DATE_ATOM, (int)filemtime($file)) : '',
+            'modified' => is_file($file) ? (int)filemtime($file) : 0,
+        ];
+    }
+    usort($rows, static fn(array $a, array $b): int => $b['modified'] <=> $a['modified']);
+    return $rows;
+}
+
+function backup_prune(int $keep = 30): int
+{
+    $keep = max(1, $keep);
+    $auto = array_values(array_filter(backup_list(), static fn(array $row): bool => $row['label'] === 'auto'));
+    $deleted = 0;
+    foreach (array_slice($auto, $keep) as $row) {
+        $path = BACKUP_PATH . DIRECTORY_SEPARATOR . $row['file'];
+        if (is_file($path) && unlink($path)) {
+            $deleted++;
+        }
+    }
+    return $deleted;
+}
+
+/**
+ * Create at most one automatic backup every 24 hours, then prune old ones.
+ */
+function backup_auto_maybe(): void
+{
+    try {
+        if ((string)(settings_get('backup_auto_enabled', '1') ?? '1') !== '1') {
+            return;
+        }
+        $lastRaw = (string)(settings_get('backup_last_at', '') ?? '');
+        $last = $lastRaw !== '' ? (int)strtotime($lastRaw) : 0;
+        if ($last > 0 && (time() - $last) < 86400) {
+            return;
+        }
+        create_backup('auto');
+        settings_set('backup_last_at', gmdate('c'));
+        backup_prune((int)(settings_get('backup_keep', '30') ?? 30));
+    } catch (Throwable $e) {
+        app_log('Automatic backup failed: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Reject files that are not intact SAJI POS databases before live data is
+ * replaced. Runs before the pre-restore safety copy so a bad upload cannot
+ * consume a backup slot or leave a half-restored database.
+ */
+function backup_validate_file(string $path): void
+{
+    $required = ['users', 'products', 'sales', 'sale_items', 'app_settings'];
+    try {
+        $probe = new SQLite3($path, SQLITE3_OPEN_READONLY);
+        try {
+            $integrity = @$probe->querySingle('PRAGMA integrity_check');
+            if (strtolower((string)$integrity) !== 'ok') {
+                throw new RuntimeException('That backup failed its integrity check and was not restored.');
+            }
+            $stmt = $probe->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :name");
+            foreach ($required as $table) {
+                $stmt->reset();
+                $stmt->bindValue(':name', $table, SQLITE3_TEXT);
+                $result = $stmt->execute();
+                $found = $result instanceof SQLite3Result ? $result->fetchArray(SQLITE3_ASSOC) : false;
+                if (!$found) {
+                    throw new RuntimeException('That file is not a complete SAJI POS backup (missing ' . $table . ').');
+                }
+            }
+        } finally {
+            $probe->close();
+        }
+    } catch (RuntimeException $e) {
+        throw $e;
+    } catch (Throwable $e) {
+        throw new RuntimeException('That file is not a readable SAJI POS backup.');
+    }
+}
+
+/**
+ * Restore a backup over the live database, keeping a safety copy first.
+ */
+function backup_restore(string $name): string
+{
+    if (!class_exists('SQLite3')) {
+        throw new RuntimeException('The SQLite3 PHP extension is required to restore backups.');
+    }
+    $path = backup_path_for($name);
+    backup_validate_file($path);
+    $safety = create_backup('pre_restore');
+
+    db()->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    db_close();
+    foreach ([DB_PATH . '-wal', DB_PATH . '-shm'] as $sidecar) {
+        if (is_file($sidecar)) {
+            @unlink($sidecar);
+        }
+    }
+
+    $source = new SQLite3($path, SQLITE3_OPEN_READONLY);
+    $destination = new SQLite3(DB_PATH);
+    $source->backup($destination);
+    $destination->close();
+    $source->close();
+
+    init_db();
+    settings_set('backup_last_at', gmdate('c'));
+    return $safety;
 }
 
 function receipt_no(): string

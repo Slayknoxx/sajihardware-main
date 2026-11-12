@@ -1,0 +1,20 @@
+# Defense in depth for deployments where Apache's document root points at the
+# project folder instead of the app being run through router.php.
+#
+# The supported way to run SAJI POS is still:
+#   php -c php-runtime.ini -S 127.0.0.1:8000 router.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(\.git|\.env|data|tools|scripts|tests|packaging|dist|lib)(/|$) - [F,L]
+</IfModule>
+
+<FilesMatch "(^\.env|^config\.php$|^lib\.php$|^kcb_client\.php$|^php\.ini$|^php-runtime\.ini$|^router\.php$|^run-pos\.bat$|\.sqlite3$|\.log$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
