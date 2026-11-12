@@ -37,3 +37,13 @@
 .inline-check{display:flex;align-items:center;gap:8px;font-weight:600}
 .inline-check input{width:auto;min-height:auto}
 .backup-actions{display:flex;gap:6px;flex-wrap:wrap}
+
+.form-grid label{display:grid;gap:6px;font-weight:700;min-width:0}
+.form-grid label input,.form-grid label select{width:100%}
+.setup-panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:24px;width:min(760px,94vw);max-height:90vh;overflow:auto;box-shadow:0 16px 40px rgba(23,41,47,.25)}
+.setup-panel h2{margin-top:0}
+.setup-panel textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px;font-family:Consolas,Monaco,monospace}
+#importPreviewResult{margin-top:12px;max-height:320px;overflow:auto}
+.import-action-insert{color:var(--ok);font-weight:700}
+.import-action-update{color:var(--warn);font-weight:700}
+.import-action-skip,.import-action-error{color:#9b1c31;font-weight:700}

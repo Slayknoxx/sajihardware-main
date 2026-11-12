@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/lib/security.php';
 require_once __DIR__ . '/lib/license.php';
+require_once __DIR__ . '/lib/import.php';
 
 $isHttps = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
     || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
@@ -72,7 +73,7 @@ try {
 
         // Prevent session fixation: issue a new ID once credentials are verified.
         session_regenerate_id(true);
-        $_SESSION['user'] = ['id' => $user['id'], 'username' => $user['username'], 'full_name' => $user['full_name'], 'role' => $user['role'], 'branch' => $user['branch']];
+        $_SESSION['user'] = ['id' => $user['id'], 'username' => $user['username'], 'full_name' => $user['full_name'], 'role' => $user['role'], 'branch' => $user['branch'], 'session_version' => (int)($user['session_version'] ?? 0)];
         $_SESSION['last_seen'] = time();
         audit($user['username'], 'LOGIN');
         json_response([
@@ -80,6 +81,8 @@ try {
             'must_change_password' => $mustChange,
             'csrf' => security_csrf_token(),
             'license' => license_status(),
+            'company' => company_profile(),
+            'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
             'version' => APP_VERSION,
         ]);
     }
@@ -100,16 +103,12 @@ try {
         }
         json_response([
             'user' => $me,
-            'company' => [
-                'name' => settings_get('company_name', COMPANY_NAME),
-                'email' => settings_get('company_email', COMPANY_EMAIL),
-                'location' => settings_get('company_location', COMPANY_LOCATION),
-                'logo' => LOGO_WEB_PATH,
-            ],
+            'company' => company_profile(),
             'csrf' => security_csrf_token(),
             'license' => license_status(),
             'version' => APP_VERSION,
             'must_change_password' => $mustChange,
+            'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
         ]);
     }
 
@@ -131,7 +130,7 @@ try {
     }
 
     // Actions that must remain reachable while unlicensed so an admin can activate.
-    $licenseExempt = ['license_status', 'license_activate', 'license_deactivate', 'change_password', 'backup', 'backup_list', 'backup_download', 'backup_delete', 'backup_restore'];
+    $licenseExempt = ['license_status', 'license_activate', 'license_deactivate', 'change_password', 'save_setup', 'reset_user_password', 'backup', 'backup_list', 'backup_download', 'backup_delete', 'backup_restore'];
     if (!in_array($action, $licenseExempt, true)) {
         license_require();
     }
@@ -317,7 +316,7 @@ try {
         if (!$quote) json_response(['error' => 'Quotation not found'], 404);
         $stmt = db()->prepare('SELECT * FROM quotation_items WHERE quotation_id=?');
         $stmt->execute([$id]);
-        json_response(['quotation' => $quote, 'items' => $stmt->fetchAll(), 'company' => ['name' => COMPANY_NAME, 'email' => COMPANY_EMAIL, 'location' => COMPANY_LOCATION, 'logo' => LOGO_WEB_PATH]]);
+        json_response(['quotation' => $quote, 'items' => $stmt->fetchAll(), 'company' => company_profile()]);
     }
 
     if ($action === 'delete_quotation') {
@@ -526,6 +525,43 @@ try {
         json_response(['ok' => true]);
     }
 
+    if ($action === 'reset_user_password') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        $accountId = (int)($d['id'] ?? 0);
+        if ($accountId < 1) {
+            json_response(['error' => 'A valid account is required'], 400);
+        }
+        if ($accountId === (int)$user['id']) {
+            json_response(['error' => 'Use Change password for your own account'], 409);
+        }
+        $stmt = db()->prepare('SELECT username, full_name FROM users WHERE id = ?');
+        $stmt->execute([$accountId]);
+        $account = $stmt->fetch();
+        if (!$account) {
+            json_response(['error' => 'Account not found'], 404);
+        }
+        $temporaryPassword = trim((string)($d['password'] ?? ''));
+        if ($temporaryPassword === '') {
+            $temporaryPassword = generate_temp_password();
+        }
+        if (strlen($temporaryPassword) < 10) {
+            json_response(['error' => 'Temporary password must be at least 10 characters'], 400);
+        }
+        if ($temporaryPassword === 'admin123') {
+            json_response(['error' => 'Choose a password other than the default'], 400);
+        }
+        db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 1, session_version = session_version + 1 WHERE id = ?')
+            ->execute([hash_password_local($temporaryPassword), $accountId]);
+        audit($user['username'], 'PASSWORD_RESET', $account['username']);
+        json_response([
+            'ok' => true,
+            'username' => $account['username'],
+            'full_name' => $account['full_name'],
+            'temporary_password' => $temporaryPassword,
+        ]);
+    }
+
     if ($action === 'checkout') {
         $d = input_json();
         $cart = $d['cart'] ?? [];
@@ -625,7 +661,7 @@ try {
             $sale['etims_qr_code'] = $qrCode;
         }
         
-        json_response(['sale' => $sale, 'items' => $items, 'company' => ['name' => COMPANY_NAME, 'email' => COMPANY_EMAIL, 'location' => COMPANY_LOCATION, 'logo' => LOGO_WEB_PATH]]);
+        json_response(['sale' => $sale, 'items' => $items, 'company' => company_profile()]);
     }
     
     if ($action === 'generate_qr') {
@@ -713,6 +749,103 @@ try {
         }
         audit($user['username'], 'SAVE_SETTINGS', implode(',', $allowed));
         json_response(['ok' => true]);
+    }
+
+    if ($action === 'save_setup') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        $name = trim((string)($d['company_name'] ?? ''));
+        if ($name === '') {
+            json_response(['error' => 'Company name is required'], 400);
+        }
+        if (strlen($name) > 120) {
+            json_response(['error' => 'Company name is too long'], 400);
+        }
+        $email = trim((string)($d['company_email'] ?? ''));
+        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+            json_response(['error' => 'Company email is not valid'], 400);
+        }
+        $logoPath = trim((string)($d['logo_path'] ?? LOGO_WEB_PATH));
+        if (str_contains($logoPath, '..') || !preg_match('#^assets/[A-Za-z0-9._/-]+$#', $logoPath)) {
+            json_response(['error' => 'Logo path must point inside the assets folder'], 400);
+        }
+        $brandColor = trim((string)($d['brand_color'] ?? '#a70437'));
+        if (!preg_match('/^#[0-9a-fA-F]{6}$/', $brandColor)) {
+            json_response(['error' => 'Brand colour must be a six-digit hex value like #a70437'], 400);
+        }
+        $settings = [
+            'company_name' => $name,
+            'company_email' => $email,
+            'company_location' => trim((string)($d['company_location'] ?? '')),
+            'company_phone' => trim((string)($d['company_phone'] ?? '')),
+            'company_tagline' => mb_substr(trim((string)($d['company_tagline'] ?? '')), 0, 160),
+            'receipt_footer' => mb_substr(trim((string)($d['receipt_footer'] ?? '')), 0, 240),
+            'brand_color' => strtolower($brandColor),
+            'logo_path' => $logoPath,
+        ];
+        foreach ($settings as $key => $value) {
+            settings_set($key, $value);
+        }
+
+        $branchName = trim((string)($d['branch_name'] ?? ''));
+        if ($branchName !== '') {
+            $branchLocation = trim((string)($d['branch_location'] ?? $settings['company_location']));
+            $branchPhone = trim((string)($d['branch_phone'] ?? $settings['company_phone']));
+            $branch = db()->query('SELECT id FROM branches ORDER BY id LIMIT 1')->fetch();
+            try {
+                if ($branch) {
+                    db()->prepare('UPDATE branches SET name = ?, location = ?, phone = ? WHERE id = ?')
+                        ->execute([$branchName, $branchLocation, $branchPhone, (int)$branch['id']]);
+                } else {
+                    db()->prepare('INSERT INTO branches(name, location, phone) VALUES(?,?,?)')
+                        ->execute([$branchName, $branchLocation, $branchPhone]);
+                }
+            } catch (Throwable $e) {
+                json_response(['error' => 'That branch name is already in use'], 409);
+            }
+        }
+
+        $licenseKey = trim((string)($d['license_key'] ?? ''));
+        if ($licenseKey !== '') {
+            try {
+                license_activate($licenseKey);
+            } catch (InvalidArgumentException $e) {
+                json_response(['error' => $e->getMessage()], 400);
+            }
+        }
+
+        settings_set('setup_completed', '1');
+        audit($user['username'], 'SAVE_SETUP', $name);
+        json_response([
+            'ok' => true,
+            'company' => company_profile(),
+            'license' => license_status(),
+            'setup_completed' => true,
+        ]);
+    }
+
+    if ($action === 'import_template') {
+        require_role(['ADMIN', 'MANAGER']);
+        json_response(csv_import_template((string)($_GET['type'] ?? '')));
+    }
+
+    if ($action === 'import_preview') {
+        require_role(['ADMIN', 'MANAGER']);
+        $d = input_json();
+        $result = csv_import_validate((string)($d['type'] ?? ''), (string)($d['csv'] ?? ''), (string)($d['mode'] ?? 'skip'));
+        unset($result['records']);
+        json_response($result);
+    }
+
+    if ($action === 'import_commit') {
+        require_role(['ADMIN', 'MANAGER']);
+        $d = input_json();
+        json_response(csv_import_commit(
+            (string)($d['type'] ?? ''),
+            (string)($d['csv'] ?? ''),
+            (string)($d['mode'] ?? 'skip'),
+            $user['username']
+        ));
     }
 
     if ($action === 'backup_download') {

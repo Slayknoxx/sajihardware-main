@@ -1,25 +1,7 @@
 # Backlog
 
-Deferred work for SAJI Hardware POS. Everything here is still open.
-
-## Authentication / accounts
-
-- [ ] **Admin password reset (any user)**
-  - Admin can reset another user's password from **Admin → Employee accounts**.
-  - Generate a strong temporary password (or accept one), store only its hash.
-  - Set `must_change_password = 1` on the target user so they must choose a new
-    password at next login.
-  - Invalidate the target user's active sessions (session version/token bump or
-    session table) so a reset logs them out.
-  - Write an `audit_logs` entry (`PASSWORD_RESET`) with actor and target.
-  - No email dependency; the admin reads/copies the temporary password once.
-
-- [ ] **Break-glass admin recovery (CLI)**
-  - A command-line script (e.g. `tools/reset_password.php --user=admin`) that
-    works even when no one can log in.
-  - Resets the password hash, sets `must_change_password = 1`, clears
-    `login_attempts` lockouts, and prints confirmation.
-  - Must not require the web server or a valid session.
+Remaining deferred work for SAJI Hardware POS. Completed work is summarized at
+the bottom for reference.
 
 ## Licensing
 
@@ -38,11 +20,29 @@ Deferred work for SAJI Hardware POS. Everything here is still open.
   - Wrap the portable build in an installer (Inno Setup or similar), sign it,
     and publish `SHA256SUMS.txt` alongside.
 
-## Tests
+## Completed in Phase 2
 
-- [ ] **Automated HTTP test in CI**
-  - `tests/http_smoke.ps1` needs a running server on port 8011. Add a wrapper
-    that starts/stops the server so the suite can run unattended.
+- [x] **Admin password reset (any user)** — **Admin → Employee accounts → Reset
+      password** issues a one-time temporary password, sets
+      `must_change_password = 1`, bumps `session_version` so existing sessions
+      are signed out, and writes a `PASSWORD_RESET` audit entry.
+- [x] **Break-glass admin recovery (CLI)** — `tools/reset_password.php --user=admin
+      [--password=...]` resets the hash, forces a password change, clears login
+      lockouts, and writes an audit entry. No web server or session required.
+      Covered by `tests/cli_reset_e2e.php`.
+- [x] **Automated HTTP test in CI** — `tests/run_http_smoke.ps1` starts the server
+      on port 8011, waits for health, runs `tests/http_smoke.ps1`, and always
+      stops the server.
+- [x] **White-label branding** — company profile fields (name, email, phone,
+      location, tagline, logo path, receipt footer, brand colour) are stored in
+      `app_settings` and rendered by the app shell, receipts, and quotations.
+- [x] **First-run setup wizard** — collected business profile, first branch, and
+      optional license activation; auto-opens for admins until `setup_completed`
+      is set.
+- [x] **CSV import** — products, customers, and suppliers with templates,
+      preview, skip/update duplicate handling, and transactional commits.
+- [x] **Test coverage** — `tests/phase2_smoke.php` (21 checks),
+      `tests/cli_reset_e2e.php` (9 checks), and the 39-check HTTP suite.
 
 ## Completed in Phase 1 (reference)
 

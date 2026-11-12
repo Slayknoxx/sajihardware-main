@@ -254,6 +254,12 @@ function settings_seed(): void
         'company_name' => COMPANY_NAME,
         'company_email' => COMPANY_EMAIL,
         'company_location' => COMPANY_LOCATION,
+        'company_phone' => '',
+        'company_tagline' => 'Hardware, tools and building materials',
+        'receipt_footer' => 'Thank you for shopping with ' . COMPANY_NAME . '.',
+        'brand_color' => '#a70437',
+        'logo_path' => LOGO_WEB_PATH,
+        'setup_completed' => '0',
         'vat_rate' => (string)VAT_RATE,
         'license_key' => '',
         'license_revoked' => '0',
@@ -276,6 +282,25 @@ function settings_seed(): void
         settings_set('trial_started_at', gmdate('c'));
     }
 }
+
+/**
+ * Branding and company details used by the app shell and printed receipts.
+ */
+function company_profile(): array
+{
+    $name = (string)(settings_get('company_name', COMPANY_NAME) ?? COMPANY_NAME);
+    return [
+        'name' => $name,
+        'email' => (string)(settings_get('company_email', COMPANY_EMAIL) ?? ''),
+        'location' => (string)(settings_get('company_location', COMPANY_LOCATION) ?? ''),
+        'phone' => (string)(settings_get('company_phone', '') ?? ''),
+        'tagline' => (string)(settings_get('company_tagline', '') ?? ''),
+        'footer' => (string)(settings_get('receipt_footer', 'Thank you for shopping with ' . $name . '.') ?? ''),
+        'logo' => (string)(settings_get('logo_path', LOGO_WEB_PATH) ?? LOGO_WEB_PATH),
+        'color' => (string)(settings_get('brand_color', '#a70437') ?? '#a70437'),
+    ];
+}
+
 
 /**
  * Append a line to data/logs/app.log without ever throwing.
@@ -304,6 +329,15 @@ function hash_password_local(string $password): string
 function verify_password_local(string $password, string $hash): bool
 {
     return password_verify($password, $hash);
+}
+
+/**
+ * Temporary password handed to an admin once, then forced to be changed at
+ * next login. Long enough to satisfy the 10-character policy.
+ */
+function generate_temp_password(): string
+{
+    return 'Saji-' . bin2hex(random_bytes(5)) . '!';
 }
 
 function ensure_table_columns(string $table, array $columns): void
@@ -574,6 +608,7 @@ function init_db(): void
 
     ensure_table_columns('users', [
         'must_change_password' => 'INTEGER NOT NULL DEFAULT 0',
+        'session_version' => 'INTEGER NOT NULL DEFAULT 0',
     ]);
     ensure_table_columns('sales', [
         'cashier_name' => 'TEXT NOT NULL DEFAULT ""',
@@ -660,7 +695,7 @@ function session_current_user(): ?array
         return null;
     }
 
-    $stmt = db()->prepare('SELECT id, username, full_name, role, branch FROM users WHERE id = ? AND active = 1');
+    $stmt = db()->prepare('SELECT id, username, full_name, role, branch, session_version FROM users WHERE id = ? AND active = 1');
     $stmt->execute([(int)$sessionUser['id']]);
     $row = $stmt->fetch();
     if (!$row) {
@@ -675,12 +710,20 @@ function session_current_user(): ?array
         return null;
     }
 
+    // A password reset (admin or CLI) bumps session_version and signs out
+    // every existing session for that account.
+    if ((int)($sessionUser['session_version'] ?? 0) !== (int)$row['session_version']) {
+        $_SESSION = [];
+        return null;
+    }
+
     $user = [
         'id' => (int)$row['id'],
         'username' => (string)$row['username'],
         'full_name' => (string)$row['full_name'],
         'role' => (string)$row['role'],
         'branch' => (string)$row['branch'],
+        'session_version' => (int)$row['session_version'],
     ];
     $_SESSION['user'] = $user;
     return $user;

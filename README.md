@@ -5,10 +5,17 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 ## Features Included
 
 - Responsive touchscreen-friendly sales screen.
+- White-label branding: company name, logo, contact details, receipt footer, and
+  brand colour are configurable and applied to the app shell and printed receipts.
+- First-run setup wizard for the business profile, first branch, and optional
+  license activation.
+- CSV import for products, customers, and suppliers with preview, duplicate
+  handling, and all-or-nothing commits.
 - Product catalog with SKU, barcode, image path, barcode image path, category, branch, warehouse, buying price, selling price, stock, and reorder level.
 - Barcode scanner support through the search box. Most USB scanners work like a keyboard, so click the search field and scan.
 - Cart, discount, cash/M-Pesa/card/voucher/credit/mixed payment methods, VAT-inclusive totals, sale hold, proforma print, checkout, stock deduction, and receipt printing.
-- Branded receipts using `public/assets/saji-logo.png`.
+- Branded receipts using the configured company profile and logo (default
+  `public/assets/saji-logo.png`).
 - Admin, Manager, and Employee login roles.
 - Admin user creation, employee records, branches, customers, suppliers, expenses, reports, sync queue, audit logs, and backups.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
@@ -18,8 +25,8 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 ## Phase 1 — Completed
 
 Phase 1 delivered the core security, licensing, and backup work. White-label
-branding/setup wizard and CSV import are deferred to Phase 2; see `BACKLOG.md`
-for everything still open.
+branding, the setup wizard, and CSV import followed in Phase 2 (below). See
+`BACKLOG.md` for everything still open.
 
 ### Security
 
@@ -91,16 +98,19 @@ php -c .\php-runtime.ini tests\restore_e2e.php
 php -c .\php-runtime.ini tests\license_states.php
 ```
 
-The HTTP suite needs the server running on port 8011 first:
+The HTTP suite starts and stops its own server on port 8011:
 
 ```powershell
-php -c .\php-runtime.ini -S 127.0.0.1:8011 router.php
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\http_smoke.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_http_smoke.ps1
 ```
 
+To run it against an already-running server, start
+`php -c .\php-runtime.ini -S 127.0.0.1:8011 router.php` and run
+`tests\http_smoke.ps1` directly.
+
 Coverage at completion: 17 Phase 1 smoke checks, 16 restore checks, 17 licensing
-state checks, and 31 HTTP checks (including traversal, CSRF, password gate, and
-backup/restore endpoints).
+state checks, and 39 HTTP checks (including traversal, CSRF, password gate,
+backup/restore, CSV import, and password-reset endpoints).
 
 ### Issue A License
 
@@ -112,6 +122,63 @@ php -c .\php-runtime.ini tools\make_license.php issue --customer="Shop Name" --p
 Paste the printed key into **Settings → License**. `keygen` is run once; keep
 `tools/keys/private.key` secret and out of the packaged build. Move the private
 key off the build machine and delete local copies once customer keys are issued.
+
+## Phase 2 — Completed
+
+### White-Label Branding
+
+- Company name, email, phone, location, tagline, logo path, receipt footer, and
+  brand colour are stored in `app_settings` and read through `company_profile()`.
+- The app title, login screen, sidebar logo, header subtitle, CSS brand colour,
+  receipts, and quotation receipts all use the saved profile.
+- **Settings → Business profile & branding** edits the same fields later, and
+  changes apply immediately without a restart.
+
+### First-Run Setup Wizard
+
+- After an admin signs in and clears the forced password change, the setup wizard
+  opens while `setup_completed` is not `1`.
+- It collects the business profile, the first branch, and an optional license key,
+  then saves everything through the `save_setup` API action.
+- **Later** hides the wizard without marking setup complete, so it returns on the
+  next sign-in.
+
+### CSV Import
+
+- **Admin → CSV import** handles products, customers, and suppliers.
+- Download a template, choose **Skip existing rows** or **Update existing rows**,
+  preview every row first, then import. Nothing is written during preview.
+- Validation errors block the whole file. Commits run in one transaction, so a
+  failed import never leaves a partial file behind.
+- Product updates change descriptive fields and prices but never overwrite stock.
+- Limits: 5,000 data rows per file, 200 preview rows shown.
+
+### Account Recovery
+
+- Admins can reset another user's password from **Admin → Employee accounts**.
+  A strong temporary password is shown once, the user is signed out, and
+  `must_change_password` forces a change at next login.
+- Break-glass CLI recovery works without the web server or a session:
+
+```powershell
+php -c .\php-runtime.ini tools\reset_password.php --user=admin
+php -c .\php-runtime.ini tools\reset_password.php --user=admin --password="NewSecret123!"
+```
+
+- Omitting `--password` generates a temporary password and prints it once. The
+  script clears login lockouts, bumps `session_version`, and writes an audit entry.
+
+### Phase 2 Test Suites
+
+```powershell
+php -c .\php-runtime.ini tests\phase2_smoke.php
+php -c .\php-runtime.ini tests\cli_reset_e2e.php
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_http_smoke.ps1
+```
+
+Coverage at completion: 21 Phase 2 checks, 9 CLI recovery checks, and the 39-check
+HTTP suite above (which now also covers import preview and password-reset session
+invalidation).
 
 ## Default Login
 
@@ -198,16 +265,18 @@ saji_hardware_pos_web/
   lib.php                  SQLite connection, schema, auth helpers, backups
   router.php               Router for the built-in server with traversal guard
   lib/
+    import.php            CSV templates, parsing, validation/preview, commit
     license.php            License states, clock guard, activation, check-in
     security.php           CSRF, security headers, origin checks, throttling
-  tests/                   Phase 1 regression suites and helpers
+  tests/                   Phase 1/2 regression suites and helpers
   tools/
     make_license.php       Issues signed offline license keys
+    reset_password.php     Break-glass CLI password recovery
     phase1_snapshot.php    Backup/integrity/key snapshot helper
   packaging/
     build-portable.ps1     Portable ZIP builder (optional bundled PHP)
   .env.example             Environment template (no secrets)
-  BACKLOG.md               Deferred work and Phase 1 completion reference
+  BACKLOG.md               Deferred work and completed-work reference
   data/
     saji_pos.sqlite3       Local secure database file created on first run
     backups/               Manual and Python backups

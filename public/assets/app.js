@@ -2,7 +2,7 @@ let csrfToken = '';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok){const error=new Error(j.error||'Request failed'); error.code=j.code; error.license=j.license; if(j.code==='PASSWORD_CHANGE_REQUIRED') showForcedPassword(); throw error;} return j});
 const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
-const state = {user:null, products:[], cart:[], page:'dashboard', license:null};
+const state = {user:null, products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true};
 const money = n => `KES ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const showPaymentLoading = (label='Waiting for M-Pesa confirmation...') => {
   const modal = document.getElementById('paymentLoadingModal');
@@ -64,10 +64,13 @@ async function boot(){
     const me = await api('me', null, 'GET');
     csrfToken = me.csrf || csrfToken;
     state.license = me.license || null;
+    state.company = me.company || state.company;
+    state.setupCompleted = me.setup_completed !== false;
     if (me.user && me.user.id) {
       state.user = me.user;
       showApp();
       if (me.must_change_password) showForcedPassword();
+      else maybeShowSetup();
       return;
     }
   } catch (err) {
@@ -107,7 +110,27 @@ function startConnectionMonitor(){
 function showApp(){
   qs('#login').classList.add('hidden'); qs('#app').classList.remove('hidden');
   qs('#userPill').textContent = `${state.user.full_name || state.user.username} · ${state.user.role}`;
+  applyBranding();
   renderNav(); renderLicenseBanner(); openPage('dashboard').catch(err=>toast(err.message));
+}
+function applyBranding(){
+  const c = state.company;
+  if (!c) return;
+  qs('#loginLogo')?.setAttribute('src', c.logo);
+  qs('#brandLogo')?.setAttribute('src', c.logo);
+  qs('#loginLogo')?.setAttribute('alt', c.name || '');
+  qs('#brandLogo')?.setAttribute('alt', c.name || '');
+  document.title = `${c.name || 'SAJI POS'} POS`;
+  const subtitle = qs('#companySubtitle');
+  if (subtitle) subtitle.textContent = [c.name, c.email, c.location].filter(Boolean).join(' · ');
+  if (c.color && /^#[0-9a-fA-F]{6}$/.test(c.color)) {
+    document.documentElement.style.setProperty('--brand', c.color);
+  }
+}
+function maybeShowSetup(){
+  if (state.setupCompleted || state.user?.role !== 'ADMIN') return;
+  const modal = qs('#setupWizard');
+  if (modal) modal.classList.remove('hidden');
 }
 function renderLicenseBanner(){
   const banner = qs('#licenseBanner');
@@ -313,11 +336,12 @@ async function printReceipt(id){
   }
   
   const div=document.createElement('section'); div.className='receipt-print';
+  const company = r.company || state.company || {};
   div.innerHTML=`
     <div class="receipt-shell">
-      <img class="receipt-logo" src="${esc(r.company.logo)}">
-      <h2>${esc(r.company.name)}</h2>
-      <p>${esc(r.company.location)}<br>${esc(r.company.email)}</p>
+      <img class="receipt-logo" src="${esc(company.logo)}">
+      <h2>${esc(company.name)}</h2>
+      <p>${esc(company.location)}<br>${esc(company.email)}${company.phone ? `<br>${esc(company.phone)}` : ''}</p>
       <div class="receipt-divider"></div>
       <p>Receipt: <b>${esc(s.receipt_no)}</b><br>${esc(receiptDate(s.created_at))}</p>
       <p>Cashier: <b>${esc(s.cashier_name || state.user?.full_name || 'System')}</b><br>Customer: <b>${esc(s.customer_name || 'Walk-in Customer')}</b></p>
@@ -331,7 +355,7 @@ async function printReceipt(id){
       <div class="receipt-divider"></div>
       ${qrUrl ? `<div style="text-align: center; margin: 10px 0;"><img src="${esc(qrUrl)}" style="max-width: 200px; height: auto;" alt="KRA QR Code"></div>` : ''}
       ${s.etims_unique_id ? `<p style="text-align: center; font-size: 10px;">ETIMS ID: ${esc(s.etims_unique_id)}</p>` : ''}
-      <p>Thank you for shopping with SAJI Hardware.</p>
+      <p>${esc(company.footer || 'Thank you for shopping with ' + (company.name || 'us') + '.')}</p>
     </div>`;
   document.body.appendChild(div); window.print(); div.remove();
 }
@@ -370,9 +394,10 @@ function renderQuotationHistory(rows){
 async function quotationDetail(id){ return api(`quotation_detail&id=${id}`, null, 'GET'); }
 async function printQuotation(id){
   const r=await quotationDetail(id), q=r.quotation;
+  const company = r.company || state.company || {};
   const items=(r.items||[]).map(item=>`<tr><td>${esc(item.product_name)}</td><td>${esc(item.quantity)}</td><td>${money(item.unit_price)}</td><td>${money(item.total)}</td></tr>`).join('');
   const div=document.createElement('section'); div.className='receipt-print';
-  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${esc(r.company.logo)}"><h2>${esc(r.company.name)}</h2><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${esc(q.quote_no)}</b><br>${esc(receiptDate(q.created_at))}<br>Valid until: ${esc(q.valid_until||'Not specified')}</p><p>Customer: <b>${esc(q.customer_name||'Walk-in Customer')}</b></p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
+  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${esc(company.logo)}"><h2>${esc(company.name)}</h2><p>${esc(company.location)}<br>${esc(company.email)}${company.phone ? `<br>${esc(company.phone)}` : ''}</p><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${esc(q.quote_no)}</b><br>${esc(receiptDate(q.created_at))}<br>Valid until: ${esc(q.valid_until||'Not specified')}</p><p>Customer: <b>${esc(q.customer_name||'Walk-in Customer')}</b></p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
   const previousTitle=document.title;
   document.title=`Quotation Receipt ${q.quote_no}`;
   document.body.appendChild(div); window.print(); div.remove(); document.title=previousTitle;
@@ -427,13 +452,18 @@ async function loadAdmin(){
   qs('#adminTables').innerHTML=parts.join('');
   qsa('[data-toggle-user]').forEach(button => button.onclick = () => setUserActive(+button.dataset.toggleUser, button.dataset.active !== '1'));
   qsa('[data-delete-user]').forEach(button => button.onclick = () => deleteUser(+button.dataset.deleteUser));
+  qsa('[data-reset-user]').forEach(button => button.onclick = () => resetUserPassword(+button.dataset.resetUser));
 }
 function renderUserAccounts(rows){
   if (!rows.length) return '<p class="muted">No employee accounts yet.</p>';
   return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Branch</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(row => {
     const active = +row.active === 1;
    const isMainAdmin = row.id === 1;
-   return `<tr><td>${esc(row.full_name || '')}</td><td>${esc(row.username || '')}</td><td>${esc(row.role || '')}</td><td>${esc(row.branch || '')}</td><td>${active ? 'Active' : 'Deactivated'}</td><td>${isMainAdmin ? '<span class="muted">Protected</span>' : `<button class="secondary" type="button" data-toggle-user="${row.id}" data-active="${active ? 1 : 0}">${active ? 'Deactivate' : 'Activate'}</button> <button class="danger" type="button" data-delete-user="${row.id}">Delete</button>`}</td></tr>`;
+   const isSelf = row.id === state.user?.id;
+   const protectedLabel = isMainAdmin ? '<span class="muted">Protected</span> ' : '';
+   const resetButton = isSelf ? '' : `<button class="secondary" type="button" data-reset-user="${row.id}">Reset password</button> `;
+   const accountButtons = isMainAdmin ? '' : `<button class="secondary" type="button" data-toggle-user="${row.id}" data-active="${active ? 1 : 0}">${active ? 'Deactivate' : 'Activate'}</button> <button class="danger" type="button" data-delete-user="${row.id}">Delete</button>`;
+   return `<tr><td>${esc(row.full_name || '')}</td><td>${esc(row.username || '')}</td><td>${esc(row.role || '')}</td><td>${esc(row.branch || '')}</td><td>${active ? 'Active' : 'Deactivated'}</td><td>${protectedLabel}${resetButton}${accountButtons}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 async function setUserActive(id, active){
@@ -451,6 +481,19 @@ async function deleteUser(id){
     await api('delete_user', {id});
     await loadAdmin();
     toast('Account deleted');
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function resetUserPassword(id){
+  if (!window.confirm('Generate a new temporary password? The user will be signed out and must change it at next login.')) return;
+  try {
+    const r = await api('reset_user_password', {id});
+    const target = qs('#tempPasswordText');
+    if (target) target.textContent = `${r.full_name || r.username} (${r.username}): ${r.temporary_password}`;
+    qs('#tempPasswordModal')?.classList.remove('hidden');
+    await loadAdmin();
+    toast('Password reset');
   } catch (error) {
     toast(error.message);
   }
@@ -502,6 +545,7 @@ async function deleteBackup(file){
 
 async function loadSettings(){
   const isAdmin = state.user?.role === 'ADMIN';
+  qsa('.admin-only').forEach(el => el.classList.toggle('hidden', !isAdmin));
   qs('#activateLicenseBtn')?.classList.toggle('hidden', !isAdmin);
   qs('#deactivateLicenseBtn')?.classList.toggle('hidden', !isAdmin);
   qs('#licenseKeyInput')?.classList.toggle('hidden', !isAdmin);
@@ -537,6 +581,107 @@ function renderLicensePanel(){
   target.innerHTML = rows.map(([k,v]) => `<div><span class="muted">${esc(k)}</span> ${esc(v)}</div>`).join('');
 }
 
+function syncBrandingForms(){
+  const c = state.company;
+  if (!c) return;
+  const values = {
+    company_name: c.name,
+    company_email: c.email,
+    company_phone: c.phone,
+    company_location: c.location,
+    company_tagline: c.tagline,
+    brand_color: c.color,
+    logo_path: c.logo,
+    receipt_footer: c.footer,
+  };
+  [qs('#brandingForm'), qs('#setupWizardForm')].forEach(form => {
+    if (!form) return;
+    for (const [name, value] of Object.entries(values)) {
+      const field = form.elements[name];
+      if (field) field.value = value ?? '';
+    }
+  });
+}
+async function saveSetup(form, closeModal = true){
+  const result = await api('save_setup', formData(form));
+  state.company = result.company || state.company;
+  state.license = result.license || state.license;
+  state.setupCompleted = result.setup_completed === true;
+  if (closeModal) {
+    qs('#setupWizard')?.classList.add('hidden');
+    const licenseInput = form.elements['license_key'];
+    if (licenseInput) licenseInput.value = '';
+  }
+  applyBranding();
+  syncBrandingForms();
+  renderLicensePanel();
+  renderLicenseBanner();
+  toast('Business profile saved');
+}
+
+let importCsv = '';
+
+async function readCsvFile(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read the CSV file'));
+    reader.readAsText(file);
+  });
+}
+async function downloadImportTemplate(){
+  const type = qs('#importType').value;
+  const result = await api(`import_template&type=${encodeURIComponent(type)}`, null, 'GET');
+  const blob = new Blob([result.csv], {type: 'text/csv;charset=utf-8'});
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = result.filename || `${type}-template.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+function renderImportPreview(result){
+  const target = qs('#importPreviewResult');
+  if (!target) return;
+  const summary = `<p><b>${result.total}</b> data row${result.total === 1 ? '' : 's'}: ${result.insert} new, ${result.update} update${result.update === 1 ? '' : 's'}, ${result.skip} skipped, <b>${result.errors.length}</b> error${result.errors.length === 1 ? '' : 's'}.</p>`;
+  const errors = result.errors.length
+    ? `<div class="license-banner danger">${result.errors.slice(0, 20).map(esc).join('<br>')}${result.errors.length > 20 ? '<br>…' : ''}</div>`
+    : '';
+  const rows = (result.rows || []).map(row => `<tr><td>${esc(row.line)}</td><td class="import-action-${esc(row.action)}">${esc(row.action)}</td><td>${esc(row.summary)}</td><td>${esc(row.message)}</td></tr>`).join('');
+  target.innerHTML = summary + errors + (rows ? `<table><thead><tr><th>Line</th><th>Action</th><th>Row</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>` : '');
+}
+async function previewImport(){
+  const file = qs('#importFile').files[0];
+  if (!file) return toast('Choose a CSV file first');
+  importCsv = await readCsvFile(file);
+  const result = await api('import_preview', {
+    type: qs('#importType').value,
+    mode: qs('#importMode').value,
+    csv: importCsv,
+  });
+  renderImportPreview(result);
+  const commit = qs('#importCommitBtn');
+  if (commit) commit.disabled = result.errors.length > 0 || result.valid === 0;
+  return result;
+}
+async function commitImport(){
+  if (!importCsv) return toast('Preview a CSV file first');
+  if (!window.confirm('Import this file now? Rows marked skip will not be changed.')) return;
+  const result = await api('import_commit', {
+    type: qs('#importType').value,
+    mode: qs('#importMode').value,
+    csv: importCsv,
+  });
+  toast(`Imported: ${result.insert} new, ${result.update} updated, ${result.skip} skipped`);
+  importCsv = '';
+  qs('#importFile').value = '';
+  qs('#importCommitBtn').disabled = true;
+  qs('#importPreviewResult').innerHTML = '';
+  await loadAdmin();
+}
+
+
 qs('#loginForm').onsubmit=async e=>{
   e.preventDefault();
   const credentials = formData(e.target);
@@ -545,8 +690,11 @@ qs('#loginForm').onsubmit=async e=>{
     csrfToken = result.csrf || csrfToken;
     state.user = result.user;
     state.license = result.license || state.license;
+    state.company = result.company || state.company;
+    state.setupCompleted = result.setup_completed !== false;
     showApp();
     if (result.must_change_password) showForcedPassword(credentials.password);
+    else maybeShowSetup();
   }catch(err){toast(err.message)}
 };
 qs('#forcedPasswordForm').onsubmit=async e=>{
@@ -556,6 +704,7 @@ qs('#forcedPasswordForm').onsubmit=async e=>{
     qs('#forcedPasswordModal').classList.add('hidden');
     e.target.reset();
     toast('Password updated');
+    maybeShowSetup();
   }catch(err){toast(err.message)}
 };
 qs('#activateLicenseBtn').onclick=async()=>{
@@ -615,6 +764,16 @@ qsa('.simpleForm').forEach(f=>f.onsubmit=async e=>{e.preventDefault(); try{await
 qs('#userForm').onsubmit=async e=>{e.preventDefault(); try{await api('create_user', formData(e.target)); e.target.reset(); await loadAdmin(); toast('User created')}catch(err){toast(err.message)}};
 qs('#resetBusinessForm').onsubmit=async e=>{e.preventDefault(); if(!window.confirm('This will permanently delete all business data. Continue?')) return; try{await api('reset_business_data',formData(e.target));e.target.reset();await openPage('dashboard');toast('Business data reset. User accounts were preserved.')}catch(err){toast(err.message)}};
 qs('#passwordForm').onsubmit=async e=>{e.preventDefault(); try{await api('change_password', formData(e.target)); e.target.reset(); toast('Password changed')}catch(err){toast(err.message)}};
+qs('#setupWizardForm').onsubmit=async e=>{e.preventDefault(); try{await saveSetup(e.target);}catch(err){toast(err.message)}};
+qs('#setupLaterBtn').onclick=()=>qs('#setupWizard').classList.add('hidden');
+qs('#brandingForm').onsubmit=async e=>{e.preventDefault(); try{await saveSetup(e.target,false);}catch(err){toast(err.message)}};
+qs('#tempPasswordCloseBtn').onclick=()=>qs('#tempPasswordModal').classList.add('hidden');
+qs('#importTemplateBtn').onclick=()=>downloadImportTemplate().catch(err=>toast(err.message));
+qs('#importPreviewBtn').onclick=()=>previewImport().catch(err=>toast(err.message));
+qs('#importCommitBtn').onclick=()=>commitImport().catch(err=>toast(err.message));
+qs('#importFile').onchange=()=>{importCsv='';qs('#importCommitBtn').disabled=true;qs('#importPreviewResult').innerHTML='';};
+qs('#importType').onchange=()=>{importCsv='';qs('#importCommitBtn').disabled=true;qs('#importPreviewResult').innerHTML='';};
+qs('#importMode').onchange=()=>{importCsv='';qs('#importCommitBtn').disabled=true;qs('#importPreviewResult').innerHTML='';};
 qs('#backupBtn').onclick=async()=>toast('Backup created: '+(await api('backup')).file);
 qs('#retryBtn').onclick=async()=>{await api('retry_sync'); await loadReports(); toast('Sync queue updated')};
 boot().catch(e=>toast(e.message));

@@ -3,19 +3,23 @@ require_once __DIR__ . '/../lib.php';
 require_once __DIR__ . '/../lib/security.php';
 init_db();
 security_send_headers();
+$company = company_profile();
+$brandColor = preg_match('/^#[0-9a-fA-F]{6}$/', $company['color']) ? $company['color'] : '#a70437';
+$defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER BY id LIMIT 1')->fetch() ?: ['name' => 'Main', 'location' => $company['location'], 'phone' => $company['phone']];
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SAJI Hardware POS</title>
+    <title><?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?> POS</title>
     <link rel="stylesheet" href="assets/styles.css">
+    <style>:root{--brand:<?= htmlspecialchars($brandColor, ENT_QUOTES, 'UTF-8') ?>}</style>
 </head>
 <body>
 <main id="login" class="login-screen">
     <section class="login-panel">
-        <img src="assets/saji-logo.png" alt="SAJI Hardware LTD" class="login-logo">
+        <img id="loginLogo" src="<?= htmlspecialchars($company['logo'], ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?>" class="login-logo">
         <form id="loginForm" class="stack">
             <label>Username<input name="username" autocomplete="username"></label>
             <label>Password<input name="password" type="password" autocomplete="current-password"></label>
@@ -26,7 +30,7 @@ security_send_headers();
 
 <section id="app" class="app hidden">
     <aside class="sidebar">
-        <img src="assets/saji-logo.png" alt="SAJI Hardware LTD" class="brand-logo">
+        <img id="brandLogo" src="<?= htmlspecialchars($company['logo'], ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?>" class="brand-logo">
         <nav id="nav"></nav>
         <button id="logoutBtn" class="ghost">Sign out</button>
     </aside>
@@ -35,7 +39,7 @@ security_send_headers();
         <header class="topbar">
             <div>
                 <h1 id="pageTitle">Dashboard</h1>
-                <p>SAJI HARDWARE LTD · sajihardwareltd@gmail.com · Kanduyi - Webuye Road</p>
+                <p id="companySubtitle"><?= htmlspecialchars(trim($company['name'] . ' · ' . $company['email'] . ' · ' . $company['location'], ' ·'), ENT_QUOTES, 'UTF-8') ?></p>
             </div>
             <div class="topbar-actions">
                 <div class="connection-pill offline" id="connectionPill">Offline</div>
@@ -156,6 +160,20 @@ security_send_headers();
                 <form class="panel simpleForm" data-table="expenses"><h2>Expenses</h2><input name="title" placeholder="Title"><input name="category" placeholder="Category"><input name="amount" type="number" placeholder="Amount"><input name="paid_by" placeholder="Paid by"><button class="primary">Record expense</button></form>
                 <form id="resetBusinessForm" class="panel"><h2>Start afresh</h2><p class="muted">Deletes sales, stock, customers, suppliers, quotations, expenses, cash movements, employees, branches, and operational history. User accounts are preserved.</p><input name="confirmation" placeholder="Type RESET BUSINESS DATA"><button class="danger" type="submit">Delete all business data</button></form>
             </div>
+            <section id="importPanel" class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>CSV import</h2><span class="muted">Preview first; nothing is written until you import</span></div>
+                <div class="form-grid">
+                    <label>Data type<select id="importType"><option value="products">Products</option><option value="customers">Customers</option><option value="suppliers">Suppliers</option></select></label>
+                    <label>Duplicates<select id="importMode"><option value="skip">Skip existing rows</option><option value="update">Update existing rows</option></select></label>
+                    <label>CSV file<input id="importFile" type="file" accept=".csv,text/csv"></label>
+                </div>
+                <div class="button-row">
+                    <button id="importTemplateBtn" class="secondary" type="button">Download template</button>
+                    <button id="importPreviewBtn" class="secondary" type="button">Preview</button>
+                    <button id="importCommitBtn" class="primary" type="button" disabled>Import rows</button>
+                </div>
+                <div id="importPreviewResult" class="table-wrap"></div>
+            </section>
             <div id="adminTables" class="panel table-wrap"></div>
         </section>
 
@@ -186,6 +204,21 @@ security_send_headers();
                     <button id="deactivateLicenseBtn" class="secondary" type="button">Remove license</button>
                 </div>
             </section>
+            <form id="brandingForm" class="panel settings-panel admin-only" style="margin-top:16px">
+                <h2>Business profile &amp; branding</h2>
+                <p class="muted">These details appear in the app header and on printed receipts.</p>
+                <div class="form-grid">
+                    <label>Company name<input name="company_name" value="<?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?>" required></label>
+                    <label>Email<input name="company_email" type="email" value="<?= htmlspecialchars($company['email'], ENT_QUOTES, 'UTF-8') ?>"></label>
+                    <label>Phone<input name="company_phone" value="<?= htmlspecialchars($company['phone'], ENT_QUOTES, 'UTF-8') ?>"></label>
+                    <label>Location<input name="company_location" value="<?= htmlspecialchars($company['location'], ENT_QUOTES, 'UTF-8') ?>"></label>
+                    <label>Tagline<input name="company_tagline" value="<?= htmlspecialchars($company['tagline'], ENT_QUOTES, 'UTF-8') ?>"></label>
+                    <label>Brand colour<input name="brand_color" type="color" value="<?= htmlspecialchars($brandColor, ENT_QUOTES, 'UTF-8') ?>"></label>
+                    <label>Logo path<input name="logo_path" value="<?= htmlspecialchars($company['logo'], ENT_QUOTES, 'UTF-8') ?>" placeholder="assets/saji-logo.png"></label>
+                    <label>Receipt footer<input name="receipt_footer" value="<?= htmlspecialchars($company['footer'], ENT_QUOTES, 'UTF-8') ?>"></label>
+                </div>
+                <button class="primary">Save business profile</button>
+            </form>
         </section>
     </section>
 </section>
@@ -206,6 +239,38 @@ security_send_headers();
         <h3>Processing M-Pesa payment</h3>
         <p id="paymentLoadingText">Waiting for the customer to complete the transaction...</p>
         <button id="cancelPaymentBtn" class="secondary" type="button">Cancel</button>
+    </div>
+</div>
+<div id="setupWizard" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="setupWizardForm" class="setup-panel stack">
+        <h2>Set up your shop</h2>
+        <p class="muted">Finish the business profile now, or choose Later and update it from Settings.</p>
+        <div class="form-grid">
+            <label>Company name<input name="company_name" value="<?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?>" required></label>
+            <label>Email<input name="company_email" type="email" value="<?= htmlspecialchars($company['email'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Phone<input name="company_phone" value="<?= htmlspecialchars($company['phone'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Location<input name="company_location" value="<?= htmlspecialchars($company['location'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Tagline<input name="company_tagline" value="<?= htmlspecialchars($company['tagline'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Brand colour<input name="brand_color" type="color" value="<?= htmlspecialchars($brandColor, ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Logo path<input name="logo_path" value="<?= htmlspecialchars($company['logo'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Receipt footer<input name="receipt_footer" value="<?= htmlspecialchars($company['footer'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>First branch<input name="branch_name" value="<?= htmlspecialchars($defaultBranch['name'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Branch location<input name="branch_location" value="<?= htmlspecialchars($defaultBranch['location'], ENT_QUOTES, 'UTF-8') ?>"></label>
+            <label>Branch phone<input name="branch_phone" value="<?= htmlspecialchars($defaultBranch['phone'], ENT_QUOTES, 'UTF-8') ?>"></label>
+        </div>
+        <label>License key (optional)<textarea name="license_key" rows="3" placeholder="Paste a license key now, or activate it later from Settings"></textarea></label>
+        <div class="button-row">
+            <button id="setupLaterBtn" class="secondary" type="button">Later</button>
+            <button class="primary">Save and finish</button>
+        </div>
+    </form>
+</div>
+<div id="tempPasswordModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <div class="payment-loading-panel">
+        <h3>Temporary password</h3>
+        <p id="tempPasswordText"></p>
+        <p class="muted">Give this to the user once. They must change it at next login.</p>
+        <button id="tempPasswordCloseBtn" class="primary" type="button">Done</button>
     </div>
 </div>
 <script src="assets/app.js"></script>

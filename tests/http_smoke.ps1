@@ -137,7 +137,48 @@ try {
         Assert "blocked traversal $traversalPath" ($traversalHttpStatus -eq 404) "status=$traversalHttpStatus"
     }
 
-    # 14. Login throttling (dummy username, leaves the real admin untouched)
+    # 14. CSV import template and preview (preview never writes)
+    $template = Invoke-RestMethod -Uri "${base}?action=import_template&type=products" -WebSession $session -Headers $headers
+    Assert 'import template returns csv' ($template.csv -match 'sku' -and $template.csv -match 'selling_price')
+    $previewCsv = "sku,name,category,selling_price`nSMOKE-1,Smoke Product,Test,10`n"
+    $previewBody = @{ type = 'products'; mode = 'skip'; csv = $previewCsv } | ConvertTo-Json
+    $preview = Invoke-RestMethod -Uri "${base}?action=import_preview" -Method Post -Body $previewBody -ContentType 'application/json' -WebSession $session -Headers $headers
+    Assert 'import preview counts rows' ($preview.total -eq 1 -and $preview.insert -eq 1) "total=$($preview.total) insert=$($preview.insert)"
+    Assert 'import preview has no errors' (@($preview.errors).Count -eq 0)
+
+    # 15. Admin password reset signs out the target and forces a change
+    $resetUsername = 'smoke_reset_' + (Get-Random -Minimum 10000 -Maximum 99999)
+    $resetUserId = $null
+    try {
+        $createBody = @{ username = $resetUsername; full_name = 'Smoke Reset'; password = 'InitialPass123!'; role = 'EMPLOYEE'; branch = 'Main' } | ConvertTo-Json
+        Invoke-RestMethod -Uri "${base}?action=create_user" -Method Post -Body $createBody -ContentType 'application/json' -WebSession $session -Headers $headers | Out-Null
+        $users = (Invoke-RestMethod -Uri "${base}?action=list&table=users" -WebSession $session -Headers $headers).rows
+        $resetUser = $users | Where-Object { $_.username -eq $resetUsername } | Select-Object -First 1
+        $resetUserId = $resetUser.id
+        Assert 'reset test user created' ($null -ne $resetUserId)
+
+        $resetSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $initialLoginBody = @{ username = $resetUsername; password = 'InitialPass123!' } | ConvertTo-Json
+        $initialLogin = Invoke-RestMethod -Uri "${base}?action=login" -Method Post -Body $initialLoginBody -ContentType 'application/json' -WebSession $resetSession
+        Assert 'reset test user can sign in' ($initialLogin.user.username -eq $resetUsername -and $initialLogin.must_change_password -eq $true)
+
+        $reset = Invoke-RestMethod -Uri "${base}?action=reset_user_password" -Method Post -Body (@{ id = $resetUserId } | ConvertTo-Json) -ContentType 'application/json' -WebSession $session -Headers $headers
+        Assert 'password reset returns a temporary password' ($reset.temporary_password.Length -ge 10)
+        $afterReset = Invoke-RestMethod -Uri "${base}?action=me" -WebSession $resetSession
+        Assert 'password reset invalidates the old session' ($null -eq $afterReset.user)
+
+        $tempLoginBody = @{ username = $resetUsername; password = $reset.temporary_password } | ConvertTo-Json
+        $tempLogin = Invoke-RestMethod -Uri "${base}?action=login" -Method Post -Body $tempLoginBody -ContentType 'application/json' -WebSession (New-Object Microsoft.PowerShell.Commands.WebRequestSession)
+        Assert 'temporary password works and forces a change' ($tempLogin.user.username -eq $resetUsername -and $tempLogin.must_change_password -eq $true)
+    } finally {
+        if ($resetUserId) {
+            try {
+                Invoke-RestMethod -Uri "${base}?action=delete_user" -Method Post -Body (@{ id = $resetUserId } | ConvertTo-Json) -ContentType 'application/json' -WebSession $session -Headers $headers | Out-Null
+            } catch { }
+        }
+    }
+
+    # 16. Login throttling (dummy username, leaves the real admin untouched)
     $throttleStatus = 0
     $ghostSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
     for ($i = 1; $i -le 6; $i++) {
