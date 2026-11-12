@@ -6,10 +6,16 @@ require_once __DIR__ . '/lib/security.php';
 require_once __DIR__ . '/lib/license.php';
 require_once __DIR__ . '/lib/import.php';
 
+$action = $_GET['action'] ?? '';
+$timeoutMinutes = 30;
+if ($action !== 'health') {
+    init_db();
+    $timeoutMinutes = max(5, min(1440, (int)settings_get('session_timeout_minutes', '30')));
+}
 $isHttps = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
     || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
 session_set_cookie_params([
-    'lifetime' => 1800,
+    'lifetime' => $timeoutMinutes * 60,
     'path' => '/',
     'secure' => $isHttps,
     'httponly' => true,
@@ -17,13 +23,6 @@ session_set_cookie_params([
 ]);
 session_start();
 security_send_headers();
-
-$action = $_GET['action'] ?? '';
-
-// The health probe runs every few seconds from the browser; skip DB setup for it.
-if ($action !== 'health') {
-    init_db();
-}
 
 // Every mutating request needs the session CSRF token. Login is exempt because
 // no authenticated token exists until the login response creates one.
@@ -33,7 +32,7 @@ if ($action !== 'login') {
 
 if (isset($_SESSION['user'])) {
     $lastSeen = (int)($_SESSION['last_seen'] ?? 0);
-    if ($lastSeen > 0 && (time() - $lastSeen) > 1800) {
+    if ($lastSeen > 0 && (time() - $lastSeen) > $timeoutMinutes * 60) {
         $_SESSION = [];
         session_unset();
         session_destroy();
@@ -65,12 +64,6 @@ try {
         }
         security_record_login($username, $ip, true);
 
-        $mustChange = (int)($user['must_change_password'] ?? 0) === 1;
-        if (!$mustChange && $password === 'admin123') {
-            db()->prepare('UPDATE users SET must_change_password = 1 WHERE id = ?')->execute([$user['id']]);
-            $mustChange = true;
-        }
-
         // Prevent session fixation: issue a new ID once credentials are verified.
         session_regenerate_id(true);
         $_SESSION['user'] = ['id' => $user['id'], 'username' => $user['username'], 'full_name' => $user['full_name'], 'role' => $user['role'], 'branch' => $user['branch'], 'session_version' => (int)($user['session_version'] ?? 0)];
@@ -78,11 +71,11 @@ try {
         audit($user['username'], 'LOGIN');
         json_response([
             'user' => $_SESSION['user'],
-            'must_change_password' => $mustChange,
             'csrf' => security_csrf_token(),
             'license' => license_status(),
             'company' => company_profile(),
             'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
+            'permissions' => role_permissions_config()[$user['role']] ?? [],
             'version' => APP_VERSION,
         ]);
     }
@@ -92,11 +85,9 @@ try {
     }
     if ($action === 'me') {
         $me = session_current_user();
-        $mustChange = false;
         if ($me) {
             try {
                 license_checkin();
-                $mustChange = user_must_change_password((int)$me['id']);
             } catch (Throwable $e) {
                 app_log('Session check error: ' . $e->getMessage());
             }
@@ -107,8 +98,8 @@ try {
             'csrf' => security_csrf_token(),
             'license' => license_status(),
             'version' => APP_VERSION,
-            'must_change_password' => $mustChange,
             'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
+            'permissions' => $me ? (role_permissions_config()[$me['role']] ?? []) : [],
         ]);
     }
 
@@ -117,20 +108,99 @@ try {
     }
 
     $user = require_login();
+    if ($action === 'system_health') {
+        require_role(['ADMIN']);
+        $latestRun = db()->query('SELECT status, findings_json, started_at, completed_at FROM integrity_runs ORDER BY id DESC LIMIT 1')->fetch();
+        $logPath = DATA_PATH . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . 'app.log';
+        $lastBackup = null;
+        $backups = backup_list();
+        if ($backups !== []) {
+            $lastBackup = $backups[0]['created_at'];
+        }
+        json_response([
+            'database' => strtolower((string)db()->query('PRAGMA integrity_check')->fetchColumn()) === 'ok' ? 'OK' : 'FAILED',
+            'foreign_key_violations' => count(db()->query('PRAGMA foreign_key_check')->fetchAll()),
+            'last_backup' => $lastBackup,
+            'log_bytes' => is_file($logPath) ? (int)filesize($logPath) : 0,
+            'latest_integrity_run' => $latestRun ? [
+                'status' => $latestRun['status'],
+                'findings' => json_decode((string)$latestRun['findings_json'], true) ?: [],
+                'started_at' => $latestRun['started_at'],
+                'completed_at' => $latestRun['completed_at'],
+            ] : null,
+        ]);
+    }
+
+    if ($action === 'save_role_settings') {
+        require_role(['ADMIN']);
+        $d = input_json();
+        $timeout = filter_var($d['session_timeout_minutes'] ?? null, FILTER_VALIDATE_INT);
+        if ($timeout === false || $timeout < 5 || $timeout > 1440) {
+            json_response(['error' => 'Session timeout must be between 5 and 1440 minutes'], 400);
+        }
+        $current = role_permissions_config();
+        $submitted = $d['permissions'] ?? null;
+        if (!is_array($submitted)) {
+            json_response(['error' => 'Role permissions are invalid'], 400);
+        }
+        foreach (['MANAGER', 'EMPLOYEE'] as $role) {
+            if (!isset($submitted[$role]) || !is_array($submitted[$role])) {
+                json_response(['error' => 'Role permissions are incomplete'], 400);
+            }
+            $limit = filter_var($submitted[$role]['discount_max_percent'] ?? null, FILTER_VALIDATE_INT);
+            if ($limit === false || $limit < 0 || $limit > 100) {
+                json_response(['error' => 'Discount limits must be between 0 and 100 percent'], 400);
+            }
+            foreach (['sale.void', 'cost.view', 'records.delete'] as $permission) {
+                if (!array_key_exists($permission, $submitted[$role]) || !is_bool($submitted[$role][$permission])) {
+                    json_response(['error' => 'Role permission values must be true or false'], 400);
+                }
+                $current[$role][$permission] = $submitted[$role][$permission];
+            }
+            $current[$role]['discount_max_percent'] = $limit;
+        }
+        $current['ADMIN'] = ['sale.void' => true, 'cost.view' => true, 'records.delete' => true, 'discount_max_percent' => 100];
+        settings_set('session_timeout_minutes', (string)$timeout);
+        settings_set('role_permissions', json_encode($current, JSON_THROW_ON_ERROR));
+        audit($user['username'], 'SAVE_ROLE_SETTINGS');
+        json_response(['ok' => true, 'session_timeout_minutes' => $timeout, 'permissions' => $current]);
+    }
+
+    if ($action === 'admin_settings') {
+        require_role(['ADMIN']);
+        json_response([
+            'session_timeout_minutes' => (int)(settings_get('session_timeout_minutes', '30') ?? 30),
+            'permissions' => role_permissions_config(),
+        ]);
+    }
+
+    if ($action === 'audit_list') {
+        require_role(['ADMIN']);
+        $page = max(1, (int)($_GET['page'] ?? 1));
+        $limit = max(10, min(100, (int)($_GET['limit'] ?? 25)));
+        $search = trim((string)($_GET['search'] ?? ''));
+        $where = '';
+        $params = [];
+        if ($search !== '') {
+            $where = ' WHERE actor LIKE ? OR action LIKE ? OR details LIKE ?';
+            $term = '%' . $search . '%';
+            $params = [$term, $term, $term];
+        }
+        $count = db()->prepare('SELECT COUNT(*) FROM audit_logs' . $where);
+        $count->execute($params);
+        $total = (int)$count->fetchColumn();
+        $query = db()->prepare('SELECT id, actor, action, details, created_at FROM audit_logs' . $where . ' ORDER BY id DESC LIMIT ? OFFSET ?');
+        $query->execute(array_merge($params, [$limit, ($page - 1) * $limit]));
+        json_response(['rows' => $query->fetchAll(), 'page' => $page, 'limit' => $limit, 'total' => $total, 'pages' => (int)ceil($total / $limit)]);
+    }
+
+    integrity_check_if_due();
 
     // Safety net: keep taking automatic backups even if the license has lapsed.
     backup_auto_maybe();
 
-    // Force a password change at the API level, not just in the UI.
-    if (user_must_change_password((int)$user['id']) && $action !== 'change_password') {
-        json_response([
-            'error' => 'Change your password before using the application.',
-            'code' => 'PASSWORD_CHANGE_REQUIRED',
-        ], 403);
-    }
-
     // Actions that must remain reachable while unlicensed so an admin can activate.
-    $licenseExempt = ['license_status', 'license_activate', 'license_deactivate', 'change_password', 'save_setup', 'reset_user_password', 'backup', 'backup_list', 'backup_download', 'backup_delete', 'backup_restore'];
+    $licenseExempt = ['license_status', 'license_activate', 'license_deactivate', 'save_setup', 'reset_user_password', 'admin_settings', 'save_role_settings', 'save_settings', 'backup', 'backup_list', 'backup_download', 'backup_delete', 'backup_restore'];
     if (!in_array($action, $licenseExempt, true)) {
         license_require();
     }
@@ -164,7 +234,13 @@ try {
         $low = $pdo->query('SELECT COUNT(*) FROM products WHERE quantity <= reorder_level')->fetchColumn();
         $stock = $pdo->query('SELECT COALESCE(SUM(quantity * buying_price),0) value FROM products')->fetchColumn();
         $recent = $pdo->query("SELECT receipt_no, customer_name, payment_method, total, created_at FROM sales WHERE status='COMPLETED' AND date(created_at)=date('now') ORDER BY id DESC LIMIT 8")->fetchAll();
-        json_response(['today' => $sales, 'month_total' => $month['total'], 'low_stock' => $low, 'stock_value' => $stock, 'recent_sales' => $recent]);
+        json_response([
+            'today' => $sales,
+            'month_total' => $month['total'],
+            'low_stock' => $low,
+            'stock_value' => role_has_permission((string)$user['role'], 'cost.view') ? $stock : null,
+            'recent_sales' => $recent,
+        ]);
     }
 
     if ($action === 'list') {
@@ -178,9 +254,18 @@ try {
             $rows = db()->query('SELECT id, username, full_name, role, branch, active, created_at FROM users ORDER BY id DESC')->fetchAll();
         } elseif ($table === 'products') {
             $rows = db()->query('SELECT p.*, COALESCE(s.name, "Unassigned") supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC LIMIT 300')->fetchAll();
+            if (!role_has_permission((string)$user['role'], 'cost.view')) {
+                foreach ($rows as &$row) {
+                    unset($row['buying_price']);
+                }
+                unset($row);
+            }
         } elseif ($table === 'quotations') {
             $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
         } else {
+            if ($table === 'audit_logs') {
+                require_role(['ADMIN']);
+            }
             $query = $table === 'sales'
                 ? "SELECT * FROM sales WHERE status='COMPLETED' ORDER BY id DESC LIMIT 300"
                 : "SELECT * FROM {$table} ORDER BY id DESC LIMIT 300";
@@ -190,7 +275,7 @@ try {
     }
 
     if ($action === 'delete_person') {
-        require_role(['ADMIN','MANAGER']);
+        require_permission('records.delete');
         $d = input_json();
         $table = ($d['table'] ?? '') === 'suppliers' ? 'suppliers' : (($d['table'] ?? '') === 'customers' ? 'customers' : '');
         $id = (int)($d['id'] ?? 0);
@@ -249,10 +334,9 @@ try {
         }
         $pdo = db();
         $pdo->beginTransaction();
-        foreach (['payment_events','sync_queue','quotation_items','quotations','sale_items','sales','held_sales','returns','cash_transactions','expenses','purchase_orders','products','customers','suppliers','employees','branches','cash_shifts'] as $table) {
+        foreach (['payment_events','payments','checkout_requests','sync_queue','quotation_items','quotations','sale_items','sales','stock_movements','held_sales','returns','cash_transactions','expenses','purchase_orders','products','customers','suppliers','employees','branches','cash_shifts'] as $table) {
             $pdo->exec('DELETE FROM ' . $table);
         }
-        $pdo->exec('DELETE FROM audit_logs');
         $pdo->prepare('INSERT INTO branches(name, location, phone) VALUES(?,?,?)')->execute(['Main', COMPANY_LOCATION, '']);
         $pdo->prepare('INSERT INTO customers(name, phone, email) VALUES(?,?,?)')->execute(['Walk-in Customer', '', COMPANY_EMAIL]);
         audit($user['username'], 'RESET_BUSINESS_DATA', 'Business data reset; user accounts preserved');
@@ -263,7 +347,8 @@ try {
     if ($action === 'etims_summary') {
         require_role(['ADMIN','MANAGER']);
         $rows = db()->query("SELECT etims_status, COUNT(*) count, COALESCE(SUM(total),0) total FROM sales WHERE status='COMPLETED' GROUP BY etims_status")->fetchAll();
-        json_response(['vat_rate' => VAT_RATE, 'rows' => $rows]);
+        $rates = array_map('floatval', array_column(db()->query('SELECT DISTINCT vat_rate FROM products ORDER BY vat_rate')->fetchAll(), 'vat_rate'));
+        json_response(['vat_rate' => count($rates) === 1 ? $rates[0] : null, 'vat_rates' => $rates, 'rows' => $rows]);
     }
 
     if ($action === 'stock_analytics') {
@@ -278,31 +363,48 @@ try {
         $cart = is_array($d['cart'] ?? null) ? $d['cart'] : [];
         if (!$cart) json_response(['error' => 'Quotation must contain at least one product'], 400);
         $pdo = db();
-        $subtotal = 0.0;
+        $subtotal = 0;
         $items = [];
         foreach ($cart as $item) {
-            $stmt = $pdo->prepare('SELECT id, name, selling_price FROM products WHERE id=?');
+            $stmt = $pdo->prepare('SELECT id, name, selling_price, vat_rate FROM products WHERE id=?');
             $stmt->execute([(int)($item['id'] ?? 0)]);
             $product = $stmt->fetch();
-            $quantity = max(1, (int)($item['qty'] ?? 1));
+            $quantity = filter_var($item['qty'] ?? null, FILTER_VALIDATE_INT);
+            if ($quantity === false || $quantity < 1 || $quantity > 10000) {
+                json_response(['error' => 'Quotation quantities must be positive whole numbers'], 400);
+            }
             if (!$product) json_response(['error' => 'Product not found'], 404);
-            $lineTotal = (float)$product['selling_price'] * $quantity;
+            $lineTotal = (int)$product['selling_price'] * $quantity;
             $subtotal += $lineTotal;
             $items[] = [$product, $quantity, $lineTotal];
         }
-        $discount = max(0, (float)($d['discount'] ?? 0));
-        $taxable = max(0, $subtotal - $discount);
-        $tax = round($taxable * VAT_RATE / (1 + VAT_RATE), 2);
+        $discount = money_to_minor($d['discount'] ?? 0);
+        $permissions = role_permissions_config();
+        $maxDiscount = (int)($permissions[$user['role']]['discount_max_percent'] ?? 0);
+        if ($discount < 0 || $discount > $subtotal || $discount * 100 > $subtotal * $maxDiscount) {
+            json_response(['error' => 'Quotation discount exceeds the amount allowed for your role'], 400);
+        }
+        $tax = 0;
+        $discountAllocated = 0;
+        foreach ($items as $index => [$product, $quantity, $lineTotal]) {
+            $lineDiscount = $index === count($items) - 1
+                ? $discount - $discountAllocated
+                : intdiv($discount * $lineTotal, max(1, $subtotal));
+            $discountAllocated += $lineDiscount;
+            $rate = max(0.0, min(1.0, (float)$product['vat_rate']));
+            $tax += (int)round(($lineTotal - $lineDiscount) * $rate / (1 + $rate), 0, PHP_ROUND_HALF_UP);
+        }
+        $total = $subtotal - $discount;
         $quoteNo = 'QT-' . date('Ymd-His') . '-' . random_int(100, 999);
-        $pdo->beginTransaction();
+        db_begin_immediate();
         $pdo->prepare('INSERT INTO quotations(quote_no, customer_id, customer_name, subtotal, tax, discount, total, valid_until, created_by) VALUES(?,?,?,?,?,?,?,?,?)')
-            ->execute([$quoteNo, !empty($d['customer_id']) ? (int)$d['customer_id'] : null, $d['customer_name'] ?? 'Walk-in Customer', $subtotal, $tax, $discount, $taxable, $d['valid_until'] ?? null, $user['id']]);
+            ->execute([$quoteNo, !empty($d['customer_id']) ? (int)$d['customer_id'] : null, $d['customer_name'] ?? 'Walk-in Customer', $subtotal, $tax, $discount, $total, $d['valid_until'] ?? null, $user['id']]);
         $quoteId = (int)$pdo->lastInsertId();
         foreach ($items as [$product, $quantity, $lineTotal]) {
             $pdo->prepare('INSERT INTO quotation_items(quotation_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
                 ->execute([$quoteId, $product['id'], $product['name'], $quantity, $product['selling_price'], $lineTotal]);
         }
-        $pdo->commit();
+        db_commit();
         audit($user['username'], 'CREATE_QUOTATION', $quoteNo);
         json_response(['ok' => true, 'id' => $quoteId, 'quote_no' => $quoteNo]);
     }
@@ -320,7 +422,7 @@ try {
     }
 
     if ($action === 'delete_quotation') {
-        require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        require_permission('records.delete');
         $id = (int)(input_json()['id'] ?? 0);
         $stmt = db()->prepare('SELECT quote_no, status FROM quotations WHERE id=?');
         $stmt->execute([$id]);
@@ -353,40 +455,71 @@ try {
         $d = input_json();
         $quotationId = (int)($d['id'] ?? 0);
         $paymentMethod = trim((string)($d['payment_method'] ?? 'Cash')) ?: 'Cash';
-        $amountPaid = max(0, (float)($d['amount_paid'] ?? 0));
-        $stmt = db()->prepare('SELECT * FROM quotations WHERE id=?');
-        $stmt->execute([$quotationId]);
-        $quote = $stmt->fetch();
-        if (!$quote) json_response(['error' => 'Quotation not found'], 404);
-        if ($quote['status'] === 'CONVERTED') json_response(['error' => 'Quotation is already a sale'], 409);
-        if ($quote['status'] !== 'ACCEPTED') json_response(['error' => 'Accept the quotation before converting it to a sale'], 409);
-        $itemsStmt = db()->prepare('SELECT * FROM quotation_items WHERE quotation_id=?');
-        $itemsStmt->execute([$quotationId]);
-        $items = $itemsStmt->fetchAll();
-        if (!$items) json_response(['error' => 'Quotation has no items'], 400);
+        if ($paymentMethod !== 'Cash') {
+            json_response(['error' => 'Quotation conversion currently supports cash payment only'], 400);
+        }
+        $amountPaid = money_to_minor($d['amount_paid'] ?? 0);
         $pdo = db();
-        $pdo->beginTransaction();
-        foreach ($items as $item) {
-            $stockStmt = $pdo->prepare('SELECT id, name, quantity FROM products WHERE id=?');
-            $stockStmt->execute([(int)$item['product_id']]);
-            $product = $stockStmt->fetch();
-            if (!$product || (int)$product['quantity'] < (int)$item['quantity']) {
-                $pdo->rollBack();
-                json_response(['error' => 'Insufficient stock for ' . ($product['name'] ?? $item['product_name'])], 409);
+        db_begin_immediate();
+        try {
+            $stmt = $pdo->prepare('SELECT * FROM quotations WHERE id=?');
+            $stmt->execute([$quotationId]);
+            $quote = $stmt->fetch();
+            if (!$quote) {
+                db_rollback();
+                json_response(['error' => 'Quotation not found'], 404);
             }
+            if ($quote['status'] === 'CONVERTED') {
+                $saleStmt = $pdo->prepare('SELECT id, receipt_no FROM sales WHERE quotation_id=?');
+                $saleStmt->execute([$quotationId]);
+                $sale = $saleStmt->fetch();
+                db_commit();
+                json_response(['ok' => true, 'sale_id' => (int)$sale['id'], 'receipt_no' => $sale['receipt_no'], 'idempotent_replay' => true]);
+            }
+            if ($quote['status'] !== 'ACCEPTED') {
+                db_rollback();
+                json_response(['error' => 'Accept the quotation before converting it to a sale'], 409);
+            }
+            $itemsStmt = $pdo->prepare('SELECT * FROM quotation_items WHERE quotation_id=?');
+            $itemsStmt->execute([$quotationId]);
+            $items = $itemsStmt->fetchAll();
+            if (!$items) {
+                db_rollback();
+                json_response(['error' => 'Quotation has no items'], 400);
+            }
+            $totalCents = (int)$quote['total'];
+            $amountPaid = $amountPaid > 0 ? $amountPaid : $totalCents;
+            if ($amountPaid < $totalCents) {
+                db_rollback();
+                json_response(['error' => 'Amount paid cannot be less than the quotation total'], 400);
+            }
+            foreach ($items as $item) {
+                $stock = $pdo->prepare('UPDATE products SET quantity=quantity-? WHERE id=? AND quantity>=?');
+                $stock->execute([(int)$item['quantity'], (int)$item['product_id'], (int)$item['quantity']]);
+                if ($stock->rowCount() !== 1) {
+                    db_rollback();
+                    json_response(['error' => 'Insufficient stock for ' . $item['product_name']], 409);
+                }
+            }
+            $receipt = receipt_no();
+            $changeDue = $amountPaid - $totalCents;
+            $effectiveVatRate = $totalCents > (int)$quote['tax'] ? (int)$quote['tax'] / ($totalCents - (int)$quote['tax']) : 0.0;
+            $pdo->prepare('INSERT INTO sales(receipt_no, customer_id, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, etims_status, cashier_name, created_by, quotation_id, paid_at, vat_amount, vat_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                ->execute([$receipt, $quote['customer_id'], $quote['customer_name'], $paymentMethod, $quote['subtotal'], $quote['tax'], $quote['discount'], $totalCents, $amountPaid, $changeDue, 'COMPLETED', 'PENDING', $user['full_name'] ?: $user['username'], $user['id'], $quotationId, date('Y-m-d H:i:s'), $quote['tax'], $effectiveVatRate]);
+            $saleId = (int)$pdo->lastInsertId();
+            foreach ($items as $item) {
+                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')->execute([$saleId, $item['product_id'], $item['product_name'], $item['quantity'], $item['unit_price'], $item['total']]);
+                $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')->execute([(int)$item['product_id'], -(int)$item['quantity'], 'SALE', $receipt, (int)$user['id']]);
+            }
+            $pdo->prepare('INSERT INTO sync_queue(entity, entity_id, action) VALUES(?,?,?)')->execute(['sale', $saleId, 'UPLOAD']);
+            $pdo->prepare("UPDATE quotations SET status='CONVERTED', converted_sale_id=? WHERE id=?")->execute([$saleId, $quotationId]);
+            db_commit();
+        } catch (Throwable $e) {
+            if (db_in_transaction()) {
+                db_rollback();
+            }
+            throw $e;
         }
-        $receipt = receipt_no();
-        $changeDue = $paymentMethod === 'Cash' ? max(0, $amountPaid - (float)$quote['total']) : 0;
-        $pdo->prepare('INSERT INTO sales(receipt_no, customer_id, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, etims_status, cashier_name, created_by, quotation_id, paid_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-            ->execute([$receipt, $quote['customer_id'], $quote['customer_name'], $paymentMethod, $quote['subtotal'], $quote['tax'], $quote['discount'], $quote['total'], $amountPaid, $changeDue, 'COMPLETED', 'PENDING', $user['full_name'] ?: $user['username'], $user['id'], $quotationId, date('Y-m-d H:i:s')]);
-        $saleId = (int)$pdo->lastInsertId();
-        foreach ($items as $item) {
-            $pdo->prepare('UPDATE products SET quantity=quantity-? WHERE id=?')->execute([(int)$item['quantity'], (int)$item['product_id']]);
-            $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')->execute([$saleId, $item['product_id'], $item['product_name'], $item['quantity'], $item['unit_price'], $item['total']]);
-        }
-        $pdo->prepare('INSERT INTO sync_queue(entity, entity_id, action) VALUES(?,?,?)')->execute(['sale', $saleId, 'UPLOAD']);
-        $pdo->prepare("UPDATE quotations SET status='CONVERTED', converted_sale_id=? WHERE id=?")->execute([$saleId, $quotationId]);
-        $pdo->commit();
         audit($user['username'], 'CONVERT_QUOTATION', $quote['quote_no'] . ' -> ' . $receipt);
         json_response(['ok' => true, 'sale_id' => $saleId, 'receipt_no' => $receipt]);
     }
@@ -394,9 +527,20 @@ try {
     if ($action === 'save_product') {
         require_role(['ADMIN','MANAGER','EMPLOYEE']);
         $d = input_json();
+        $quantity = filter_var($d['quantity'] ?? null, FILTER_VALIDATE_INT);
+        $buyingPrice = money_to_minor($d['buying_price'] ?? null);
+        $sellingPrice = money_to_minor($d['selling_price'] ?? null);
+        $vatRate = (float)($d['vat_rate'] ?? VAT_RATE);
+        if ($quantity === false || $quantity < 0 || $buyingPrice < 0 || $sellingPrice < 0 || $vatRate < 0 || $vatRate > 1) {
+            json_response(['error' => 'Product quantity, prices, or VAT rate are invalid'], 400);
+        }
         $stmt = db()->prepare('INSERT INTO products(sku, barcode, name, category, brand, image_path, barcode_image_path, warehouse, branch, buying_price, selling_price, quantity, reorder_level, supplier_id, supplied_quantity, vat_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-        $quantity = (int)$d['quantity'];
-        $stmt->execute([$d['sku'], $d['barcode'] ?? '', $d['name'], $d['category'], $d['brand'] ?? '', $d['image_path'] ?? '', $d['barcode_image_path'] ?? '', $d['warehouse'] ?? 'Main', $d['branch'] ?? 'Main', (float)$d['buying_price'], (float)$d['selling_price'], $quantity, (int)($d['reorder_level'] ?? 5), !empty($d['supplier_id']) ? (int)$d['supplier_id'] : null, $quantity, (float)($d['vat_rate'] ?? VAT_RATE)]);
+        $stmt->execute([$d['sku'], $d['barcode'] ?? '', $d['name'], $d['category'], $d['brand'] ?? '', $d['image_path'] ?? '', $d['barcode_image_path'] ?? '', $d['warehouse'] ?? 'Main', $d['branch'] ?? 'Main', $buyingPrice, $sellingPrice, $quantity, (int)($d['reorder_level'] ?? 5), !empty($d['supplier_id']) ? (int)$d['supplier_id'] : null, $quantity, $vatRate]);
+        $productId = (int)db()->lastInsertId();
+        if ($quantity > 0) {
+            db()->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
+                ->execute([$productId, $quantity, 'OPENING', 'product-create', (int)$user['id']]);
+        }
         audit($user['username'], 'CREATE_PRODUCT', $d['sku']);
         json_response(['ok' => true]);
     }
@@ -433,6 +577,12 @@ try {
         require_role($roles);
         $cols = end($defs[$table]);
         $values = array_map(fn($c) => $d[$c] ?? '', $cols);
+        foreach (['salary', 'amount'] as $moneyColumn) {
+            $position = array_search($moneyColumn, $cols, true);
+            if ($position !== false) {
+                $values[$position] = money_to_minor($values[$position]);
+            }
+        }
         if ($table === 'cash_transactions') {
             $values[array_search('created_by', $cols, true)] = $user['id'];
         }
@@ -448,7 +598,7 @@ try {
         if (strlen((string)($d['password'] ?? '')) < 10) {
             json_response(['error' => 'Password must be at least 10 characters'], 400);
         }
-        db()->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,1)')
+        db()->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,0)')
             ->execute([$d['username'], $d['full_name'], hash_password_local((string)$d['password']), $d['role'], $d['branch'] ?? 'Main']);
         audit($user['username'], 'CREATE_USER', $d['username']);
         json_response(['ok' => true]);
@@ -504,36 +654,12 @@ try {
         json_response(['ok' => true]);
     }
 
-    if ($action === 'change_password') {
-        $d = input_json();
-        $stmt = db()->prepare('SELECT password_hash FROM users WHERE id = ?');
-        $stmt->execute([$user['id']]);
-        $row = $stmt->fetch();
-        if (!$row || !verify_password_local((string)($d['current_password'] ?? ''), $row['password_hash'])) {
-            json_response(['error' => 'Current password is incorrect'], 400);
-        }
-        $newPassword = (string)($d['new_password'] ?? '');
-        if (strlen($newPassword) < 10) {
-            json_response(['error' => 'New password must be at least 10 characters'], 400);
-        }
-        if ($newPassword === 'admin123') {
-            json_response(['error' => 'Choose a password other than the default'], 400);
-        }
-        db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
-            ->execute([hash_password_local($newPassword), $user['id']]);
-        audit($user['username'], 'CHANGE_PASSWORD');
-        json_response(['ok' => true]);
-    }
-
     if ($action === 'reset_user_password') {
         require_role(['ADMIN']);
         $d = input_json();
         $accountId = (int)($d['id'] ?? 0);
         if ($accountId < 1) {
             json_response(['error' => 'A valid account is required'], 400);
-        }
-        if ($accountId === (int)$user['id']) {
-            json_response(['error' => 'Use Change password for your own account'], 409);
         }
         $stmt = db()->prepare('SELECT username, full_name FROM users WHERE id = ?');
         $stmt->execute([$accountId]);
@@ -551,7 +677,7 @@ try {
         if ($temporaryPassword === 'admin123') {
             json_response(['error' => 'Choose a password other than the default'], 400);
         }
-        db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 1, session_version = session_version + 1 WHERE id = ?')
+        db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 0, session_version = session_version + 1 WHERE id = ?')
             ->execute([hash_password_local($temporaryPassword), $accountId]);
         audit($user['username'], 'PASSWORD_RESET', $account['username']);
         json_response([
@@ -564,75 +690,238 @@ try {
 
     if ($action === 'checkout') {
         $d = input_json();
-        $cart = $d['cart'] ?? [];
-        if (!$cart) {
-            json_response(['error' => 'Cart is empty'], 400);
+        $cartInput = $d['cart'] ?? null;
+        if (!is_array($cartInput) || $cartInput === [] || count($cartInput) > 200) {
+            json_response(['error' => 'Cart must contain between 1 and 200 items'], 400);
         }
-        $pdo = db();
-        $pdo->beginTransaction();
-        $subtotal = 0.0;
-        foreach ($cart as $item) {
-            $stmt = $pdo->prepare('SELECT * FROM products WHERE id = ?');
-            $stmt->execute([(int)$item['id']]);
-            $p = $stmt->fetch();
-            if (!$p || (int)$p['quantity'] < (int)$item['qty']) {
-                throw new RuntimeException('Insufficient stock for ' . ($p['name'] ?? 'product'));
+        $idempotencyKey = trim((string)($d['idempotency_key'] ?? ''));
+        if (!preg_match('/^[A-Za-z0-9._:-]{16,128}$/', $idempotencyKey)) {
+            json_response(['error' => 'A valid checkout idempotency key is required'], 400);
+        }
+        $paymentMethod = trim((string)($d['payment_method'] ?? ''));
+        if (!in_array($paymentMethod, ['Cash', 'M-Pesa'], true)) {
+            json_response(['error' => 'Select a supported payment method'], 400);
+        }
+        $cart = [];
+        foreach ($cartInput as $item) {
+            if (!is_array($item)) {
+                json_response(['error' => 'Cart items are invalid'], 400);
             }
-            $line = (float)$p['selling_price'] * (int)$item['qty'];
-            $subtotal += $line;
-            $pdo->prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?')->execute([(int)$item['qty'], (int)$p['id']]);
+            $productId = filter_var($item['id'] ?? null, FILTER_VALIDATE_INT);
+            $quantity = filter_var($item['qty'] ?? null, FILTER_VALIDATE_INT);
+            if ($productId === false || $productId < 1 || $quantity === false || $quantity < 1 || $quantity > 10000) {
+                json_response(['error' => 'Each cart item needs a valid product and quantity'], 400);
+            }
+            $cart[$productId] = ($cart[$productId] ?? 0) + $quantity;
+            if ($cart[$productId] > 10000) {
+                json_response(['error' => 'Cart quantity is too large'], 400);
+            }
         }
-        $discount = (float)($d['discount'] ?? 0);
-        $taxable = max(0, $subtotal - $discount);
-        $tax = round($taxable * VAT_RATE / (1 + VAT_RATE), 2);
-        $total = round($taxable, 2);
-        $receipt = receipt_no();
-        $paymentMethod = $d['payment_method'] ?? 'Cash';
-        $paymentReference = $paymentMethod === 'M-Pesa' ? payment_reference() : $receipt;
-        $paid = (float)($d['amount_paid'] ?? $total);
+        ksort($cart);
+        $discountCents = money_to_minor($d['discount'] ?? 0);
+        if ($discountCents < 0) {
+            json_response(['error' => 'Discount cannot be negative'], 400);
+        }
+        $customerName = trim((string)($d['customer_name'] ?? 'Walk-in Customer'));
+        $customerName = $customerName !== '' ? $customerName : 'Walk-in Customer';
+        if (strlen($customerName) > 120) {
+            json_response(['error' => 'Customer name is too long'], 400);
+        }
         $mpesaPhone = $paymentMethod === 'M-Pesa' ? normalize_phone((string)($d['mpesa_phone'] ?? '')) : '';
         if ($paymentMethod === 'M-Pesa' && !preg_match('/^254\d{9,10}$/', $mpesaPhone)) {
             json_response(['error' => 'Enter a valid 254-format mobile number.'], 400);
         }
-        $changeDue = $paymentMethod === 'Cash' ? max(0, $paid - $total) : 0.0;
-        $saleStatus = $paymentMethod === 'M-Pesa' ? 'PENDING_PAYMENT' : 'COMPLETED';
-        $paid = $paymentMethod === 'M-Pesa' ? 0.0 : (float)($d['amount_paid'] ?? $total);
-        $changeDue = $paymentMethod === 'Cash' ? max(0, $paid - $total) : 0.0;
-        
-        // Initialize ETIMS/VSCU
-        require_once __DIR__ . '/api/VsculEtims.php';
-        $vscu = new VsculEtims(KRA_PIN, VSCU_SERIAL, VSCU_VERIFICATION_KEY, VSCU_DEVICE_ID, ETIMS_SANDBOX);
-        
-        // Generate ETIMS data
-        $etimsUniqueId = $vscu->generateEtimsUniqueId();
-        $etimsTransactionId = $vscu->generateEtimsTransactionId();
-        $etimsStatus = ETIMS_ENABLED ? 'PENDING' : 'EXEMPTED';
-        
-        // Generate QR code data (actual QR will be generated when receipt is printed)
-        $qrCodeData = $vscu->generateQRCode([
-            'receipt_no' => $receipt,
-            'created_at' => date('Y-m-d H:i:s'),
-            'total' => $total,
-            'tax' => $tax
-        ]);
-        
-        $pdo->prepare('INSERT INTO sales(receipt_no, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, cashier_name, mpesa_phone, payment_reference, created_by, mpesa_status, paid_at, vat_amount, vat_rate, etims_status, etims_unique_id, etims_transaction_id, kra_pin, invoice_type, etims_qr_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-            ->execute([$receipt, $d['customer_name'] ?? 'Walk-in Customer', $paymentMethod, $subtotal, $tax, $discount, $total, $paid, $changeDue, $saleStatus, $user['full_name'] ?: $user['username'], $mpesaPhone, $paymentReference, $user['id'], $paymentMethod === 'M-Pesa' ? 'PENDING' : 'NOT_SENT', $paymentMethod === 'M-Pesa' ? null : date('Y-m-d H:i:s'), $tax, VAT_RATE, $etimsStatus, $etimsUniqueId, $etimsTransactionId, KRA_PIN, 'NORMAL', $qrCodeData]);
-        $saleId = (int)$pdo->lastInsertId();
-        foreach ($cart as $item) {
-            $stmt = $pdo->prepare('SELECT name, selling_price FROM products WHERE id = ?');
-            $stmt->execute([(int)$item['id']]);
-            $p = $stmt->fetch();
-            $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
-                ->execute([$saleId, (int)$item['id'], $p['name'], (int)$item['qty'], (float)$p['selling_price'], (float)$p['selling_price'] * (int)$item['qty']]);
+        $amountPaidInput = money_to_minor($d['amount_paid'] ?? 0);
+        $requestHash = hash('sha256', json_encode([
+            'cart' => $cart,
+            'payment_method' => $paymentMethod,
+            'discount' => $discountCents,
+            'amount_paid' => $amountPaidInput,
+            'customer_name' => $customerName,
+            'mpesa_phone' => $mpesaPhone,
+        ], JSON_THROW_ON_ERROR));
+        $pdo = db();
+        db_begin_immediate();
+        try {
+            $existing = $pdo->prepare('SELECT request_hash, response_json FROM checkout_requests WHERE user_id = ? AND idempotency_key = ?');
+            $existing->execute([(int)$user['id'], $idempotencyKey]);
+            $previous = $existing->fetch();
+            if ($previous) {
+                if (!hash_equals((string)$previous['request_hash'], $requestHash)) {
+                    db_rollback();
+                    json_response(['error' => 'This checkout key was already used for different sale details'], 409);
+                }
+                $response = json_decode((string)$previous['response_json'], true);
+                db_commit();
+                if (!is_array($response)) {
+                    throw new RuntimeException('Stored checkout response is invalid.');
+                }
+                if (isset($response['sale_id'])) {
+                    $saleStatus = $pdo->prepare('SELECT status FROM sales WHERE id=?');
+                    $saleStatus->execute([(int)$response['sale_id']]);
+                    $currentStatus = $saleStatus->fetchColumn();
+                    if ($currentStatus === 'COMPLETED') {
+                        $response['payment_status'] = 'PAID';
+                    } elseif ($currentStatus === 'PAYMENT_FAILED') {
+                        $response['payment_status'] = 'PAYMENT_FAILED';
+                    } elseif ($currentStatus === 'VOID') {
+                        $response['payment_status'] = 'VOID';
+                    }
+                }
+                $response['idempotent_replay'] = true;
+                json_response($response);
+            }
+
+            $lines = [];
+            $subtotalCents = 0;
+            foreach ($cart as $productId => $quantity) {
+                $stmt = $pdo->prepare('SELECT id, name, selling_price, vat_rate FROM products WHERE id = ?');
+                $stmt->execute([$productId]);
+                $product = $stmt->fetch();
+                if (!$product) {
+                    db_rollback();
+                    json_response(['error' => 'A product in the cart no longer exists'], 409);
+                }
+                $stock = $pdo->prepare('UPDATE products SET quantity = quantity - ? WHERE id = ? AND quantity >= ?');
+                $stock->execute([$quantity, $productId, $quantity]);
+                if ($stock->rowCount() !== 1) {
+                    db_rollback();
+                    json_response(['error' => 'Insufficient stock for ' . $product['name']], 409);
+                }
+                $unitCents = (int)$product['selling_price'];
+                $lineCents = $unitCents * $quantity;
+                $subtotalCents += $lineCents;
+                $lines[] = ['product' => $product, 'quantity' => $quantity, 'unit_cents' => $unitCents, 'line_cents' => $lineCents];
+            }
+            if ($discountCents > $subtotalCents) {
+                db_rollback();
+                json_response(['error' => 'Discount cannot exceed the sale subtotal'], 400);
+            }
+            $rolePermissions = role_permissions_config();
+            $discountLimit = (int)($rolePermissions[$user['role']]['discount_max_percent'] ?? 0);
+            if ($discountCents * 100 > $subtotalCents * $discountLimit) {
+                db_rollback();
+                json_response(['error' => 'Discount exceeds the maximum allowed for your role'], 403);
+            }
+
+            $totalCents = $subtotalCents - $discountCents;
+            $taxCents = 0;
+            $allocatedDiscount = 0;
+            foreach ($lines as $index => $line) {
+                $lineDiscount = $index === count($lines) - 1
+                    ? $discountCents - $allocatedDiscount
+                    : intdiv($discountCents * $line['line_cents'], max(1, $subtotalCents));
+                $allocatedDiscount += $lineDiscount;
+                $rate = max(0.0, min(1.0, (float)$line['product']['vat_rate']));
+                $taxCents += (int)round(($line['line_cents'] - $lineDiscount) * $rate / (1 + $rate), 0, PHP_ROUND_HALF_UP);
+            }
+            $effectiveVatRate = $totalCents > $taxCents ? $taxCents / ($totalCents - $taxCents) : 0.0;
+            $amountPaidCents = 0;
+            if ($paymentMethod === 'Cash') {
+                $amountPaidCents = $amountPaidInput > 0 ? $amountPaidInput : $totalCents;
+                if ($amountPaidCents < $totalCents) {
+                    db_rollback();
+                    json_response(['error' => 'Amount paid cannot be less than the sale total'], 400);
+                }
+            }
+            $changeCents = $paymentMethod === 'Cash' ? $amountPaidCents - $totalCents : 0;
+            $receipt = receipt_no();
+            $paymentReference = $paymentMethod === 'M-Pesa' ? payment_reference() : $receipt;
+            $saleStatus = $paymentMethod === 'M-Pesa' ? 'PENDING_PAYMENT' : 'COMPLETED';
+
+            require_once __DIR__ . '/api/VsculEtims.php';
+            $vscu = new VsculEtims(KRA_PIN, VSCU_SERIAL, VSCU_VERIFICATION_KEY, VSCU_DEVICE_ID, ETIMS_SANDBOX);
+            $etimsUniqueId = $vscu->generateEtimsUniqueId();
+            $etimsTransactionId = $vscu->generateEtimsTransactionId();
+            $etimsStatus = ETIMS_ENABLED ? 'PENDING' : 'EXEMPTED';
+            $qrCodeData = $vscu->generateQRCode([
+                'receipt_no' => $receipt,
+                'created_at' => date('Y-m-d H:i:s'),
+                'total' => money_minor_to_major($totalCents),
+                'tax' => money_minor_to_major($taxCents),
+            ]);
+
+            $pdo->prepare('INSERT INTO sales(receipt_no, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, cashier_name, mpesa_phone, payment_reference, created_by, mpesa_status, paid_at, vat_amount, vat_rate, etims_status, etims_unique_id, etims_transaction_id, kra_pin, invoice_type, etims_qr_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                ->execute([$receipt, $customerName, $paymentMethod, $subtotalCents, $taxCents, $discountCents, $totalCents, $amountPaidCents, $changeCents, $saleStatus, $user['full_name'] ?: $user['username'], $mpesaPhone, $paymentReference, $user['id'], $paymentMethod === 'M-Pesa' ? 'PENDING' : 'NOT_SENT', $paymentMethod === 'M-Pesa' ? null : date('Y-m-d H:i:s'), $taxCents, $effectiveVatRate, $etimsStatus, $etimsUniqueId, $etimsTransactionId, KRA_PIN, 'NORMAL', $qrCodeData]);
+            $saleId = (int)$pdo->lastInsertId();
+            foreach ($lines as $line) {
+                $product = $line['product'];
+                $quantity = $line['quantity'];
+                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
+                    ->execute([$saleId, (int)$product['id'], $product['name'], $quantity, $line['unit_cents'], $line['line_cents']]);
+                $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
+                    ->execute([(int)$product['id'], -$quantity, 'SALE', $receipt, (int)$user['id']]);
+            }
+            $pdo->prepare('INSERT INTO sync_queue(entity, entity_id, action) VALUES(?,?,?)')->execute(['sale', $saleId, 'UPLOAD']);
+            $response = [
+                'ok' => true,
+                'payment_status' => $paymentMethod === 'M-Pesa' ? 'PENDING_PAYMENT' : 'PAID',
+                'sale_id' => $saleId,
+                'receipt_no' => $receipt,
+                'payment_reference' => $paymentReference,
+                'amount' => $totalCents,
+                'phone' => $mpesaPhone,
+                'poll_seconds' => 90,
+            ];
+            $pdo->prepare('INSERT INTO checkout_requests(user_id, idempotency_key, request_hash, response_json) VALUES(?,?,?,?)')
+                ->execute([(int)$user['id'], $idempotencyKey, $requestHash, json_encode($response, JSON_THROW_ON_ERROR)]);
+            db_commit();
+        } catch (Throwable $e) {
+            if (db_in_transaction()) {
+                db_rollback();
+            }
+            throw $e;
         }
-        $pdo->prepare('INSERT INTO sync_queue(entity, entity_id, action) VALUES(?,?,?)')->execute(['sale', $saleId, 'UPLOAD']);
-        $pdo->commit();
         audit($user['username'], 'CHECKOUT', $receipt);
-        if ($paymentMethod === 'M-Pesa') {
-            json_response(['ok' => true, 'payment_status' => 'PENDING_PAYMENT', 'sale_id' => $saleId, 'receipt_no' => $receipt, 'payment_reference' => $paymentReference, 'amount' => $total, 'phone' => $mpesaPhone, 'poll_seconds' => 90]);
+        json_response($response);
+    }
+
+    if ($action === 'void_sale') {
+        $user = require_permission('sale.void');
+        $saleId = (int)(input_json()['sale_id'] ?? 0);
+        if ($saleId < 1) {
+            json_response(['error' => 'A valid sale is required'], 400);
         }
-        json_response(['ok' => true, 'payment_status' => 'PAID', 'sale_id' => $saleId, 'receipt_no' => $receipt]);
+        db_begin_immediate();
+        try {
+            $saleStmt = db()->prepare('SELECT receipt_no, status, mpesa_status FROM sales WHERE id=?');
+            $saleStmt->execute([$saleId]);
+            $sale = $saleStmt->fetch();
+            if (!$sale) {
+                db_rollback();
+                json_response(['error' => 'Sale not found'], 404);
+            }
+            if ($sale['status'] !== 'COMPLETED') {
+                db_rollback();
+                json_response(['error' => 'Only completed sales can be voided'], 409);
+            }
+            if ($sale['mpesa_status'] !== 'NOT_SENT' && $sale['mpesa_status'] !== 'PAID') {
+                db_rollback();
+                json_response(['error' => 'A pending or failed M-Pesa sale cannot be voided here'], 409);
+            }
+            $items = db()->prepare('SELECT product_id, quantity FROM sale_items WHERE sale_id=?');
+            $items->execute([$saleId]);
+            $saleItems = $items->fetchAll();
+            if (!$saleItems) {
+                db_rollback();
+                json_response(['error' => 'Sale has no items to return to stock'], 409);
+            }
+            db()->prepare("UPDATE sales SET status='VOID' WHERE id=? AND status='COMPLETED'")->execute([$saleId]);
+            foreach ($saleItems as $item) {
+                db()->prepare('UPDATE products SET quantity=quantity+? WHERE id=?')
+                    ->execute([(int)$item['quantity'], (int)$item['product_id']]);
+                db()->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
+                    ->execute([(int)$item['product_id'], (int)$item['quantity'], 'VOID_SALE', $sale['receipt_no'], (int)$user['id']]);
+            }
+            audit($user['username'], 'VOID_SALE', $sale['receipt_no']);
+            db_commit();
+        } catch (Throwable $e) {
+            if (db_in_transaction()) {
+                db_rollback();
+            }
+            throw $e;
+        }
+        json_response(['ok' => true, 'receipt_no' => $sale['receipt_no']]);
     }
 
     if ($action === 'receipt') {
@@ -655,7 +944,10 @@ try {
         if ($sale && !$sale['etims_qr_code']) {
             require_once __DIR__ . '/api/VsculEtims.php';
             $vscu = new VsculEtims(KRA_PIN, VSCU_SERIAL, VSCU_VERIFICATION_KEY, VSCU_DEVICE_ID, ETIMS_SANDBOX);
-            $qrCode = $vscu->generateQRCode($sale);
+            $qrSale = $sale;
+            $qrSale['total'] = money_minor_to_major($sale['total']);
+            $qrSale['tax'] = money_minor_to_major($sale['tax']);
+            $qrCode = $vscu->generateQRCode($qrSale);
             // Update sale with QR code
             db()->prepare('UPDATE sales SET etims_qr_code = ? WHERE id = ?')->execute([$qrCode, $id]);
             $sale['etims_qr_code'] = $qrCode;
@@ -677,7 +969,10 @@ try {
         require_once __DIR__ . '/api/VsculEtims.php';
         $vscu = new VsculEtims(KRA_PIN, VSCU_SERIAL, VSCU_VERIFICATION_KEY, VSCU_DEVICE_ID, ETIMS_SANDBOX);
         
-        $qrData = $vscu->generateQRCode($sale);
+        $qrSale = $sale;
+        $qrSale['total'] = money_minor_to_major($sale['total']);
+        $qrSale['tax'] = money_minor_to_major($sale['tax']);
+        $qrData = $vscu->generateQRCode($qrSale);
         
         // Generate QR code image using a free QR library or service
         // For now, we'll return the data and let frontend generate the QR
@@ -834,6 +1129,8 @@ try {
         $d = input_json();
         $result = csv_import_validate((string)($d['type'] ?? ''), (string)($d['csv'] ?? ''), (string)($d['mode'] ?? 'skip'));
         unset($result['records']);
+        $result['row_count'] = $result['total'];
+        unset($result['total']);
         json_response($result);
     }
 
@@ -871,8 +1168,19 @@ try {
     if ($action === 'backup_restore') {
         require_role(['ADMIN']);
         $d = input_json();
-        if (strtoupper(trim((string)($d['confirm'] ?? ''))) !== 'RESTORE') {
+        $confirmText = strtoupper(trim((string)($d['confirm'] ?? '')));
+        if ($confirmText !== 'RESTORE') {
             json_response(['error' => 'Type RESTORE to confirm this action'], 400);
+        }
+        $currentPassword = trim((string)($d['password'] ?? ''));
+        if ($currentPassword === '') {
+            json_response(['error' => 'Enter your current password to restore a backup'], 400);
+        }
+        $currentUser = db()->prepare('SELECT password_hash FROM users WHERE id = ? LIMIT 1');
+        $currentUser->execute([(int)$user['id']]);
+        $currentRow = $currentUser->fetch();
+        if (!$currentRow || !verify_password_local($currentPassword, (string)$currentRow['password_hash'])) {
+            json_response(['error' => 'Current password is incorrect'], 400);
         }
         $name = (string)($d['file'] ?? '');
         $safety = backup_restore($name);
@@ -890,8 +1198,8 @@ try {
 } catch (Throwable $e) {
     app_log('API error [' . $action . ']: ' . get_class($e) . ': ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
     try {
-        if (db()->inTransaction()) {
-            db()->rollBack();
+        if (db_in_transaction()) {
+            db_rollback();
         }
     } catch (Throwable $rollbackError) {
         app_log('Rollback failed: ' . $rollbackError->getMessage());

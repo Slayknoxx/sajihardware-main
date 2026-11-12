@@ -172,9 +172,49 @@ final class SqliteDb
     }
 }
 
+function db_begin_immediate(): void
+{
+    $connection = db();
+    if ($connection instanceof PDO) {
+        $connection->exec('BEGIN IMMEDIATE TRANSACTION');
+        DbHolder::$immediateTransactionOpen = true;
+        return;
+    }
+    $connection->beginTransaction();
+}
+
+function db_commit(): void
+{
+    $connection = db();
+    if ($connection instanceof PDO) {
+        $connection->exec('COMMIT');
+        DbHolder::$immediateTransactionOpen = false;
+        return;
+    }
+    $connection->commit();
+}
+
+function db_rollback(): void
+{
+    $connection = db();
+    if ($connection instanceof PDO) {
+        $connection->exec('ROLLBACK');
+        DbHolder::$immediateTransactionOpen = false;
+        return;
+    }
+    $connection->rollBack();
+}
+
+function db_in_transaction(): bool
+{
+    $connection = db();
+    return DbHolder::$immediateTransactionOpen || ($connection instanceof PDO ? $connection->inTransaction() : $connection->inTransaction());
+}
+
 final class DbHolder
 {
     public static PDO|SqliteDb|null $connection = null;
+    public static bool $immediateTransactionOpen = false;
 }
 
 function db(): PDO|SqliteDb
@@ -210,6 +250,7 @@ function db(): PDO|SqliteDb
 function db_close(): void
 {
     DbHolder::$connection = null;
+    DbHolder::$immediateTransactionOpen = false;
 }
 
 /**
@@ -245,6 +286,46 @@ function settings_forget(string $key): void
     db()->prepare('DELETE FROM app_settings WHERE key = ?')->execute([$key]);
 }
 
+function role_permissions_config(): array
+{
+    $defaults = [
+        'ADMIN' => ['sale.void' => true, 'cost.view' => true, 'records.delete' => true, 'discount_max_percent' => 100],
+        'MANAGER' => ['sale.void' => true, 'cost.view' => false, 'records.delete' => false, 'discount_max_percent' => 10],
+        'EMPLOYEE' => ['sale.void' => false, 'cost.view' => false, 'records.delete' => false, 'discount_max_percent' => 5],
+    ];
+    $decoded = json_decode((string)settings_get('role_permissions', ''), true);
+    if (!is_array($decoded)) {
+        return $defaults;
+    }
+
+    foreach ($defaults as $role => $base) {
+        $roleValues = is_array($decoded[$role] ?? null) ? $decoded[$role] : [];
+        foreach (['sale.void', 'cost.view', 'records.delete'] as $permission) {
+            $defaults[$role][$permission] = $role === 'ADMIN'
+                ? true
+                : (isset($roleValues[$permission]) ? (bool)$roleValues[$permission] : $base[$permission]);
+        }
+        $limit = $roleValues['discount_max_percent'] ?? $base['discount_max_percent'];
+        $defaults[$role]['discount_max_percent'] = $role === 'ADMIN' ? 100 : max(0, min(100, (int)$limit));
+    }
+    return $defaults;
+}
+
+function role_has_permission(string $role, string $permission): bool
+{
+    $permissions = role_permissions_config();
+    return (bool)($permissions[$role][$permission] ?? false);
+}
+
+function require_permission(string $permission): array
+{
+    $user = require_login();
+    if (!role_has_permission((string)$user['role'], $permission)) {
+        json_response(['error' => 'You do not have permission for this action'], 403);
+    }
+    return $user;
+}
+
 /**
  * Seed defaults once so licensing, branding and backups have stable values.
  */
@@ -269,6 +350,13 @@ function settings_seed(): void
         'backup_auto_enabled' => '1',
         'backup_keep' => '30',
         'backup_last_at' => '',
+        'integrity_last_run_date' => '',
+        'session_timeout_minutes' => '30',
+        'role_permissions' => json_encode([
+            'ADMIN' => ['sale.void' => true, 'cost.view' => true, 'records.delete' => true, 'discount_max_percent' => 100],
+            'MANAGER' => ['sale.void' => true, 'cost.view' => false, 'records.delete' => false, 'discount_max_percent' => 10],
+            'EMPLOYEE' => ['sale.void' => false, 'cost.view' => false, 'records.delete' => false, 'discount_max_percent' => 5],
+        ], JSON_THROW_ON_ERROR),
     ];
     foreach ($defaults as $key => $value) {
         if (settings_get($key) === null) {
@@ -305,19 +393,245 @@ function company_profile(): array
 /**
  * Append a line to data/logs/app.log without ever throwing.
  */
-function app_log(string $message, bool $sensitive = false): void
+function app_log(string $message, bool $sensitive = false, string $level = 'error'): void
 {
     try {
         $dir = DATA_PATH . DIRECTORY_SEPARATOR . 'logs';
         if (!is_dir($dir)) {
             mkdir($dir, 0775, true);
         }
-        $line = '[' . gmdate('Y-m-d H:i:s') . ' UTC] ' . $message . PHP_EOL;
-        file_put_contents($dir . DIRECTORY_SEPARATOR . 'app.log', $line, FILE_APPEND | LOCK_EX);
+        $path = $dir . DIRECTORY_SEPARATOR . 'app.log';
+        $maxBytes = 2 * 1024 * 1024;
+        if (is_file($path) && (int)filesize($path) >= $maxBytes) {
+            $keep = 4;
+            for ($index = $keep; $index >= 1; $index--) {
+                $from = $path . '.' . $index;
+                $to = $path . '.' . ($index + 1);
+                if ($index === $keep && is_file($from)) {
+                    unlink($from);
+                }
+                if (is_file($from)) {
+                    rename($from, $to);
+                }
+            }
+            if (is_file($path)) {
+                rename($path, $path . '.1');
+            }
+        }
+        $record = [
+            'timestamp' => gmdate(DATE_ATOM),
+            'level' => in_array($level, ['debug', 'info', 'warning', 'error', 'critical'], true) ? $level : 'error',
+            'message' => $sensitive ? '[REDACTED]' : $message,
+        ];
+        file_put_contents($path, json_encode($record, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . PHP_EOL, FILE_APPEND | LOCK_EX);
     } catch (Throwable $e) {
         if (!$sensitive) {
             error_log($message);
         }
+    }
+}
+
+function run_integrity_checks(): array
+{
+    $findings = [];
+    $integrity = strtolower((string)db()->query('PRAGMA integrity_check')->fetchColumn());
+    if ($integrity !== 'ok') {
+        $findings[] = ['check' => 'database_integrity', 'details' => $integrity];
+    }
+
+    foreach (db()->query('PRAGMA foreign_key_check')->fetchAll() as $row) {
+        $findings[] = [
+            'check' => 'foreign_key',
+            'details' => ['table' => $row['table'] ?? '', 'rowid' => $row['rowid'] ?? null, 'parent' => $row['parent'] ?? ''],
+        ];
+    }
+
+    foreach (db()->query("SELECT p.id, p.sku, p.quantity, COALESCE(SUM(m.quantity_delta), 0) AS ledger_quantity
+        FROM products p
+        LEFT JOIN stock_movements m ON m.product_id = p.id
+        GROUP BY p.id
+        HAVING p.quantity <> COALESCE(SUM(m.quantity_delta), 0)")->fetchAll() as $row) {
+        $findings[] = [
+            'check' => 'stock_ledger',
+            'details' => ['product_id' => (int)$row['id'], 'sku' => (string)$row['sku'], 'stock' => (int)$row['quantity'], 'ledger' => (int)$row['ledger_quantity']],
+        ];
+    }
+
+    foreach (db()->query("SELECT id, sku, quantity FROM products WHERE quantity < 0")->fetchAll() as $row) {
+        $findings[] = [
+            'check' => 'negative_stock',
+            'details' => ['product_id' => (int)$row['id'], 'sku' => (string)$row['sku'], 'stock' => (int)$row['quantity']],
+        ];
+    }
+
+    $status = $findings === [] ? 'OK' : 'FAILED';
+    db()->prepare('INSERT INTO integrity_runs(status, findings_json, completed_at) VALUES(?,?,CURRENT_TIMESTAMP)')
+        ->execute([$status, json_encode($findings, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)]);
+    if ($findings !== []) {
+        app_log('Database integrity check found ' . count($findings) . ' issue(s).', false, 'warning');
+    }
+    return ['status' => $status, 'findings' => $findings];
+}
+
+function integrity_check_if_due(): void
+{
+    $today = gmdate('Y-m-d');
+    if ((string)(settings_get('integrity_last_run_date', '') ?? '') === $today) {
+        return;
+    }
+    try {
+        $result = run_integrity_checks();
+        settings_set('integrity_last_run_date', $today);
+        if ($result['status'] !== 'OK') {
+            app_log('Daily database integrity check failed: ' . json_encode($result['findings'], JSON_UNESCAPED_SLASHES), false, 'warning');
+        }
+    } catch (Throwable $e) {
+        app_log('Daily database integrity check could not complete: ' . $e->getMessage(), false, 'critical');
+        try {
+            settings_set('integrity_last_run_date', $today);
+        } catch (Throwable $settingsError) {
+            app_log('Could not record daily integrity-check date: ' . $settingsError->getMessage(), false, 'critical');
+        }
+    }
+}
+
+function money_to_minor(mixed $value): int
+{
+    $text = trim((string)$value);
+    if ($text === '' || !preg_match('/^([+-]?)(\d+)(?:\.(\d+))?$/', $text, $matches)) {
+        throw new InvalidArgumentException('Enter a valid monetary amount.');
+    }
+    $wholeText = ltrim($matches[2], '0');
+    $wholeText = $wholeText === '' ? '0' : $wholeText;
+    $maxWholeText = (string)intdiv(PHP_INT_MAX, 100);
+    if (strlen($wholeText) > strlen($maxWholeText)
+        || (strlen($wholeText) === strlen($maxWholeText) && strcmp($wholeText, $maxWholeText) > 0)) {
+        throw new InvalidArgumentException('Monetary amount is too large.');
+    }
+    $fraction = $matches[3] ?? '';
+    $wholeMinor = (int)$wholeText * 100;
+    $fractionMinor = (int)str_pad(substr($fraction, 0, 2), 2, '0');
+    if ($fractionMinor > PHP_INT_MAX - $wholeMinor) {
+        throw new InvalidArgumentException('Monetary amount is too large.');
+    }
+    $minor = $wholeMinor + $fractionMinor;
+    if (isset($fraction[2]) && $fraction[2] >= '5') {
+        if ($minor === PHP_INT_MAX) {
+            throw new InvalidArgumentException('Monetary amount is too large.');
+        }
+        $minor++;
+    }
+    return ($matches[1] ?? '') === '-' ? -$minor : $minor;
+}
+
+function money_minor_to_major(int|float|string|null $minor): float
+{
+    return round((float)$minor / 100, 2);
+}
+
+function money_json_format(mixed $value, ?string $key = null): mixed
+{
+    static $moneyFields = [
+        'buying_price' => true, 'selling_price' => true, 'balance' => true,
+        'salary' => true, 'opening_float' => true, 'cash_declared' => true,
+        'subtotal' => true, 'tax' => true, 'discount' => true, 'total' => true,
+        'amount_paid' => true, 'change_due' => true, 'unit_price' => true,
+        'amount' => true, 'vat_amount' => true, 'cash_sales' => true,
+        'total_sales' => true, 'total_expenses' => true, 'other_income' => true,
+        'other_expenses' => true, 'net_cash' => true, 'income' => true,
+        'expenses' => true, 'stock_value' => true,
+    ];
+    if ($key !== null && isset($moneyFields[$key]) && is_numeric($value)) {
+        return money_minor_to_major($value);
+    }
+    if (!is_array($value)) {
+        return $value;
+    }
+    $formatted = [];
+    foreach ($value as $itemKey => $item) {
+        $formatted[$itemKey] = money_json_format($item, is_string($itemKey) ? $itemKey : null);
+    }
+    return $formatted;
+}
+
+function run_schema_migrations(): void
+{
+    db()->exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    $applied = (int)db()->query('SELECT COUNT(*) FROM schema_migrations WHERE version = 1')->fetchColumn();
+    if ($applied > 0) {
+        return;
+    }
+
+    $moneyColumns = [
+        'products' => ['buying_price', 'selling_price'],
+        'customers' => ['balance'],
+        'suppliers' => ['balance'],
+        'employees' => ['salary'],
+        'cash_shifts' => ['opening_float', 'cash_declared'],
+        'sales' => ['subtotal', 'tax', 'discount', 'total', 'amount_paid', 'change_due', 'vat_amount'],
+        'sale_items' => ['unit_price', 'total'],
+        'returns' => ['amount'],
+        'expenses' => ['amount'],
+        'cash_transactions' => ['amount'],
+        'quotations' => ['subtotal', 'tax', 'discount', 'total'],
+        'quotation_items' => ['unit_price', 'total'],
+        'purchase_orders' => ['total'],
+        'payments' => ['amount'],
+    ];
+
+    db_begin_immediate();
+    try {
+        foreach ($moneyColumns as $table => $columns) {
+            $knownColumns = array_column(db()->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');
+            foreach ($columns as $column) {
+                if (in_array($column, $knownColumns, true)) {
+                    db()->exec('UPDATE ' . $table . ' SET ' . $column . ' = CAST(ROUND(COALESCE(' . $column . ', 0) * 100.0) AS INTEGER)');
+                }
+            }
+        }
+        db()->exec("INSERT INTO stock_movements(product_id, quantity_delta, reason, reference)
+            SELECT p.id, p.quantity, 'OPENING', 'migration-v1'
+            FROM products p
+            WHERE NOT EXISTS (SELECT 1 FROM stock_movements m WHERE m.product_id = p.id)");
+        db()->exec('INSERT INTO schema_migrations(version) VALUES(1)');
+        db_commit();
+    } catch (Throwable $e) {
+        if (db_in_transaction()) {
+            db_rollback();
+        }
+        throw $e;
+    }
+}
+
+function reset_default_admin_once(): void
+{
+    $applied = (int)db()->query('SELECT COUNT(*) FROM schema_migrations WHERE version = 2')->fetchColumn();
+    if ($applied > 0) {
+        return;
+    }
+
+    db_begin_immediate();
+    try {
+        $applied = (int)db()->query('SELECT COUNT(*) FROM schema_migrations WHERE version = 2')->fetchColumn();
+        if ($applied > 0) {
+            db_commit();
+            return;
+        }
+        $admin = db()->prepare('SELECT id FROM users WHERE username = ?');
+        $admin->execute(['admin']);
+        $adminId = $admin->fetchColumn();
+        if ($adminId !== false) {
+            db()->prepare("UPDATE users SET password_hash=?, role='ADMIN', active=1, must_change_password=0, session_version=session_version+1 WHERE id=?")
+                ->execute([hash_password_local('admin123'), (int)$adminId]);
+            db()->prepare('DELETE FROM login_attempts WHERE username=?')->execute(['admin']);
+        }
+        db()->prepare('INSERT INTO schema_migrations(version) VALUES(2)')->execute();
+        db_commit();
+    } catch (Throwable $e) {
+        if (db_in_transaction()) {
+            db_rollback();
+        }
+        throw $e;
     }
 }
 
@@ -332,8 +646,7 @@ function verify_password_local(string $password, string $hash): bool
 }
 
 /**
- * Temporary password handed to an admin once, then forced to be changed at
- * next login. Long enough to satisfy the 10-character policy.
+ * Generate a strong temporary password for an administrator-issued reset.
  */
 function generate_temp_password(): string
 {
@@ -381,8 +694,8 @@ function init_db(): void
             barcode_image_path TEXT NOT NULL DEFAULT '',
             warehouse TEXT NOT NULL DEFAULT 'Main',
             branch TEXT NOT NULL DEFAULT 'Main',
-            buying_price REAL NOT NULL DEFAULT 0,
-            selling_price REAL NOT NULL DEFAULT 0,
+            buying_price INTEGER NOT NULL DEFAULT 0,
+            selling_price INTEGER NOT NULL DEFAULT 0,
             quantity INTEGER NOT NULL DEFAULT 0,
             reorder_level INTEGER NOT NULL DEFAULT 5,
             supplier_id INTEGER,
@@ -396,7 +709,7 @@ function init_db(): void
             phone TEXT NOT NULL DEFAULT '',
             email TEXT NOT NULL DEFAULT '',
             kra_pin TEXT NOT NULL DEFAULT '',
-            balance REAL NOT NULL DEFAULT 0,
+            balance INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS suppliers (
@@ -405,7 +718,7 @@ function init_db(): void
             phone TEXT NOT NULL DEFAULT '',
             email TEXT NOT NULL DEFAULT '',
             kra_pin TEXT NOT NULL DEFAULT '',
-            balance REAL NOT NULL DEFAULT 0,
+            balance INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS employees (
@@ -413,7 +726,7 @@ function init_db(): void
             name TEXT NOT NULL,
             phone TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL,
-            salary REAL NOT NULL DEFAULT 0,
+            salary INTEGER NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -428,8 +741,8 @@ function init_db(): void
         CREATE TABLE IF NOT EXISTS cash_shifts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             opened_by INTEGER NOT NULL,
-            opening_float REAL NOT NULL,
-            cash_declared REAL,
+            opening_float INTEGER NOT NULL,
+            cash_declared INTEGER,
             status TEXT NOT NULL DEFAULT 'OPEN',
             opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             closed_at TEXT,
@@ -441,12 +754,12 @@ function init_db(): void
             customer_id INTEGER,
             customer_name TEXT NOT NULL DEFAULT 'Walk-in Customer',
             payment_method TEXT NOT NULL,
-            subtotal REAL NOT NULL,
-            tax REAL NOT NULL,
-            discount REAL NOT NULL DEFAULT 0,
-            total REAL NOT NULL,
-            amount_paid REAL NOT NULL DEFAULT 0,
-            change_due REAL NOT NULL DEFAULT 0,
+            subtotal INTEGER NOT NULL,
+            tax INTEGER NOT NULL,
+            discount INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL,
+            amount_paid INTEGER NOT NULL DEFAULT 0,
+            change_due INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'COMPLETED',
             mpesa_status TEXT NOT NULL DEFAULT 'NOT_SENT',
             etims_status TEXT NOT NULL DEFAULT 'PENDING',
@@ -461,8 +774,8 @@ function init_db(): void
             product_id INTEGER NOT NULL,
             product_name TEXT NOT NULL,
             quantity INTEGER NOT NULL,
-            unit_price REAL NOT NULL,
-            total REAL NOT NULL,
+            unit_price INTEGER NOT NULL,
+            total INTEGER NOT NULL,
             FOREIGN KEY(sale_id) REFERENCES sales(id),
             FOREIGN KEY(product_id) REFERENCES products(id)
         );
@@ -477,7 +790,7 @@ function init_db(): void
         CREATE TABLE IF NOT EXISTS returns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             receipt_no TEXT NOT NULL,
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             reason TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'PENDING',
             created_by INTEGER NOT NULL,
@@ -487,7 +800,7 @@ function init_db(): void
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             category TEXT NOT NULL,
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             paid_by TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -496,7 +809,7 @@ function init_db(): void
             type TEXT NOT NULL CHECK(type IN ('INCOME','EXPENSE')),
             category TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             reference TEXT NOT NULL DEFAULT '',
             created_by INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -507,10 +820,10 @@ function init_db(): void
             quote_no TEXT NOT NULL UNIQUE,
             customer_id INTEGER,
             customer_name TEXT NOT NULL DEFAULT 'Walk-in Customer',
-            subtotal REAL NOT NULL DEFAULT 0,
-            tax REAL NOT NULL DEFAULT 0,
-            discount REAL NOT NULL DEFAULT 0,
-            total REAL NOT NULL DEFAULT 0,
+            subtotal INTEGER NOT NULL DEFAULT 0,
+            tax INTEGER NOT NULL DEFAULT 0,
+            discount INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'DRAFT',
             valid_until TEXT,
             converted_sale_id INTEGER,
@@ -525,8 +838,8 @@ function init_db(): void
             product_id INTEGER NOT NULL,
             product_name TEXT NOT NULL,
             quantity INTEGER NOT NULL,
-            unit_price REAL NOT NULL,
-            total REAL NOT NULL,
+            unit_price INTEGER NOT NULL,
+            total INTEGER NOT NULL,
             FOREIGN KEY(quotation_id) REFERENCES quotations(id) ON DELETE CASCADE,
             FOREIGN KEY(product_id) REFERENCES products(id)
         );
@@ -535,7 +848,7 @@ function init_db(): void
             supplier_id INTEGER NOT NULL,
             po_number TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'DRAFT',
-            total REAL NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(supplier_id) REFERENCES suppliers(id)
         );
@@ -563,7 +876,7 @@ function init_db(): void
             receipt_no TEXT NOT NULL DEFAULT '',
             payment_reference TEXT NOT NULL UNIQUE,
             phone TEXT NOT NULL DEFAULT '',
-            amount REAL NOT NULL DEFAULT 0,
+            amount INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'PENDING',
             checkout_request_id TEXT NOT NULL DEFAULT '',
             merchant_request_id TEXT NOT NULL DEFAULT '',
@@ -587,6 +900,34 @@ function init_db(): void
             payload_json TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(payment_id) REFERENCES payments(id)
+        );
+        CREATE TABLE IF NOT EXISTS checkout_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            response_json TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, idempotency_key),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            quantity_delta INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            reference TEXT NOT NULL DEFAULT '',
+            created_by INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(product_id) REFERENCES products(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS integrity_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,
+            findings_json TEXT NOT NULL DEFAULT '[]',
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT
         );
     ");
 
@@ -617,7 +958,7 @@ function init_db(): void
         'mpesa_request_id' => 'TEXT NOT NULL DEFAULT ""',
         'mpesa_receipt_no' => 'TEXT NOT NULL DEFAULT ""',
         'paid_at' => 'TEXT',
-        'vat_amount' => 'REAL NOT NULL DEFAULT 0',
+        'vat_amount' => 'INTEGER NOT NULL DEFAULT 0',
         'vat_rate' => 'REAL NOT NULL DEFAULT 0.16',
         'etims_invoice_no' => 'TEXT NOT NULL DEFAULT ""',
         'etims_error' => 'TEXT NOT NULL DEFAULT ""',
@@ -645,12 +986,15 @@ function init_db(): void
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_reference ON payment_events(provider_reference) WHERE provider_reference != ""');
     $pdo->exec('UPDATE products SET supplied_quantity = quantity + COALESCE((SELECT SUM(quantity) FROM sale_items WHERE sale_items.product_id = products.id), 0) WHERE supplied_quantity = 0');
 
+    run_schema_migrations();
     settings_seed();
 
-    if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() === 0) {
-        $stmt = $pdo->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,1)');
+    $adminExists = (int)$pdo->query('SELECT COUNT(*) FROM users WHERE username = "admin"')->fetchColumn();
+    if ($adminExists === 0) {
+        $stmt = $pdo->prepare('INSERT INTO users(username, full_name, password_hash, role, branch, must_change_password) VALUES(?,?,?,?,?,0)');
         $stmt->execute(['admin', 'System Administrator', hash_password_local('admin123'), 'ADMIN', 'Main']);
     }
+    reset_default_admin_once();
     if ((int)$pdo->query('SELECT COUNT(*) FROM branches')->fetchColumn() === 0) {
         $pdo->prepare('INSERT INTO branches(name, location, phone) VALUES(?,?,?)')->execute(['Main', COMPANY_LOCATION, '']);
     }
@@ -660,21 +1004,18 @@ function init_db(): void
     if ((int)$pdo->query('SELECT COUNT(*) FROM products')->fetchColumn() === 0) {
         $stmt = $pdo->prepare('INSERT INTO products(sku, barcode, name, category, brand, buying_price, selling_price, quantity, reorder_level) VALUES(?,?,?,?,?,?,?,?,?)');
         foreach ([
-            ['SH-001', '600001', 'Cement 50kg', 'Building Materials', 'Bamburi', 680, 790, 80, 15],
-            ['SH-002', '600002', 'Binding Wire 20kg', 'Steel', 'Generic', 2100, 2450, 25, 5],
-            ['SH-003', '600003', 'PVC Pipe 1 inch', 'Plumbing', 'Pipelife', 240, 320, 70, 10],
-            ['SH-004', '600004', 'Roofing Nails 1kg', 'Fasteners', 'Generic', 180, 260, 100, 20],
+            ['SH-001', '600001', 'Cement 50kg', 'Building Materials', 'Bamburi', 68000, 79000, 80, 15],
+            ['SH-002', '600002', 'Binding Wire 20kg', 'Steel', 'Generic', 210000, 245000, 25, 5],
+            ['SH-003', '600003', 'PVC Pipe 1 inch', 'Plumbing', 'Pipelife', 24000, 32000, 70, 10],
+            ['SH-004', '600004', 'Roofing Nails 1kg', 'Fasteners', 'Generic', 18000, 26000, 100, 20],
         ] as $row) {
             $stmt->execute($row);
         }
     }
-}
-
-function user_must_change_password(int $userId): bool
-{
-    $stmt = db()->prepare('SELECT must_change_password FROM users WHERE id = ?');
-    $stmt->execute([$userId]);
-    return (int)($stmt->fetchColumn() ?: 0) === 1;
+    $pdo->exec("INSERT INTO stock_movements(product_id, quantity_delta, reason, reference)
+        SELECT p.id, p.quantity, 'OPENING', 'initial-stock'
+        FROM products p
+        WHERE NOT EXISTS (SELECT 1 FROM stock_movements m WHERE m.product_id = p.id)");
 }
 
 /**
@@ -774,7 +1115,7 @@ function json_response(array $data, int $status = 200): never
 {
     http_response_code($status);
     header('Content-Type: application/json');
-    echo json_encode($data, JSON_PRETTY_PRINT);
+    echo json_encode(money_json_format($data), JSON_PRETTY_PRINT);
     exit;
 }
 
@@ -813,14 +1154,16 @@ function audit(string $actor, string $action, string $details = ''): void
 
 function create_backup(string $label = 'manual'): string
 {
-    init_db();
     if (!class_exists('SQLite3')) {
         throw new RuntimeException('The SQLite3 PHP extension is required for database backup.');
     }
     if (!is_dir(BACKUP_PATH)) {
         mkdir(BACKUP_PATH, 0775, true);
     }
-    db()->exec('PRAGMA wal_checkpoint(FULL)');
+    db_close();
+    $live = new SQLite3(DB_PATH);
+    $live->exec('PRAGMA wal_checkpoint(FULL)');
+    $live->close();
     $file = BACKUP_PATH . DIRECTORY_SEPARATOR . 'backup_' . preg_replace('/[^a-z0-9_-]/i', '-', $label) . '_' . date('Ymd_His') . '.sqlite3';
     $source = new SQLite3(DB_PATH);
     $backup = new SQLite3($file);
@@ -956,10 +1299,12 @@ function backup_restore(string $name): string
     }
     $path = backup_path_for($name);
     backup_validate_file($path);
+    db_close();
     $safety = create_backup('pre_restore');
 
-    db()->exec('PRAGMA wal_checkpoint(TRUNCATE)');
-    db_close();
+    $live = new SQLite3(DB_PATH);
+    $live->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    $live->close();
     foreach ([DB_PATH . '-wal', DB_PATH . '-shm'] as $sidecar) {
         if (is_file($sidecar)) {
             @unlink($sidecar);

@@ -40,7 +40,6 @@ try {
     $login = Invoke-RestMethod -Uri "${base}?action=login" -Method Post -Body $loginBody -ContentType 'application/json' -WebSession $session
     Assert 'login returns user' ([bool]$login.user.id)
     Assert 'login returns csrf token' ([bool]$login.csrf)
-    Assert 'login reports password-change flag' ($login.must_change_password -eq $true)
     $csrf = $login.csrf
     $headers = @{ 'X-CSRF-Token' = $csrf }
 
@@ -54,29 +53,9 @@ try {
     }
     Assert 'request without CSRF is rejected' ($noCsrfStatus -eq 403) "status=$noCsrfStatus"
 
-    # 5. Forced password change is enforced server-side
-    $gateStatus = 0
-    $gateBody = ''
-    try {
-        Invoke-WebRequest -Uri "${base}?action=dashboard" -Method Post -Body '{}' -ContentType 'application/json' -WebSession $session -Headers $headers -UseBasicParsing | Out-Null
-        $gateStatus = 200
-    } catch {
-        $gateStatus = [int]$_.Exception.Response.StatusCode
-        $gateBody = Read-ErrorBody $_
-    }
-    Assert 'dashboard blocked until password changes' ($gateStatus -eq 403) "status=$gateStatus"
-    Assert 'blocked response carries PASSWORD_CHANGE_REQUIRED' ($gateBody -match 'PASSWORD_CHANGE_REQUIRED') $gateBody
-
-    # 6. Change the password, then the gate opens
-    $changeBody = @{ current_password = 'admin123'; new_password = 'SmokeTest!2026' } | ConvertTo-Json
-    $change = Invoke-RestMethod -Uri "${base}?action=change_password" -Method Post -Body $changeBody -ContentType 'application/json' -WebSession $session -Headers $headers
-    Assert 'password change succeeds' ($change.ok -eq $true)
-    $meAfter = Invoke-RestMethod -Uri "${base}?action=me" -WebSession $session
-    Assert 'must_change_password cleared' ($meAfter.must_change_password -eq $false)
-
-    # 7. Mutating request with CSRF succeeds after the change
+    # 5. Login proceeds directly to the application without a password-change gate
     $dashboard = Invoke-RestMethod -Uri "${base}?action=dashboard" -Method Post -Body '{}' -ContentType 'application/json' -WebSession $session -Headers $headers
-    Assert 'request with CSRF succeeds' ($null -ne $dashboard.today)
+    Assert 'dashboard is available immediately after login' ($null -ne $dashboard.today)
 
     # 8. License endpoints
     $license = Invoke-RestMethod -Uri "${base}?action=license_status" -WebSession $session -Headers $headers
@@ -143,10 +122,10 @@ try {
     $previewCsv = "sku,name,category,selling_price`nSMOKE-1,Smoke Product,Test,10`n"
     $previewBody = @{ type = 'products'; mode = 'skip'; csv = $previewCsv } | ConvertTo-Json
     $preview = Invoke-RestMethod -Uri "${base}?action=import_preview" -Method Post -Body $previewBody -ContentType 'application/json' -WebSession $session -Headers $headers
-    Assert 'import preview counts rows' ($preview.total -eq 1 -and $preview.insert -eq 1) "total=$($preview.total) insert=$($preview.insert)"
+    Assert 'import preview counts rows' ($preview.row_count -eq 1 -and $preview.insert -eq 1) "row_count=$($preview.row_count) insert=$($preview.insert)"
     Assert 'import preview has no errors' (@($preview.errors).Count -eq 0)
 
-    # 15. Admin password reset signs out the target and forces a change
+    # 15. Admin password reset signs out the target without forcing a password change
     $resetUsername = 'smoke_reset_' + (Get-Random -Minimum 10000 -Maximum 99999)
     $resetUserId = $null
     try {
@@ -160,7 +139,7 @@ try {
         $resetSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
         $initialLoginBody = @{ username = $resetUsername; password = 'InitialPass123!' } | ConvertTo-Json
         $initialLogin = Invoke-RestMethod -Uri "${base}?action=login" -Method Post -Body $initialLoginBody -ContentType 'application/json' -WebSession $resetSession
-        Assert 'reset test user can sign in' ($initialLogin.user.username -eq $resetUsername -and $initialLogin.must_change_password -eq $true)
+        Assert 'reset test user can sign in directly' ($initialLogin.user.username -eq $resetUsername)
 
         $reset = Invoke-RestMethod -Uri "${base}?action=reset_user_password" -Method Post -Body (@{ id = $resetUserId } | ConvertTo-Json) -ContentType 'application/json' -WebSession $session -Headers $headers
         Assert 'password reset returns a temporary password' ($reset.temporary_password.Length -ge 10)
@@ -169,7 +148,7 @@ try {
 
         $tempLoginBody = @{ username = $resetUsername; password = $reset.temporary_password } | ConvertTo-Json
         $tempLogin = Invoke-RestMethod -Uri "${base}?action=login" -Method Post -Body $tempLoginBody -ContentType 'application/json' -WebSession (New-Object Microsoft.PowerShell.Commands.WebRequestSession)
-        Assert 'temporary password works and forces a change' ($tempLogin.user.username -eq $resetUsername -and $tempLogin.must_change_password -eq $true)
+        Assert 'temporary password works without a forced change' ($tempLogin.user.username -eq $resetUsername)
     } finally {
         if ($resetUserId) {
             try {

@@ -15,7 +15,7 @@ function csv_import_catalog(): array
         'products' => [
             'label' => 'Products',
             'file' => 'products-template.csv',
-            'columns' => ['sku', 'barcode', 'name', 'category', 'brand', 'buying_price', 'selling_price', 'quantity', 'reorder_level', 'warehouse', 'branch', 'supplier'],
+            'columns' => ['sku', 'barcode', 'name', 'category', 'brand', 'buying_price', 'selling_price', 'vat_rate', 'quantity', 'reorder_level', 'warehouse', 'branch', 'supplier'],
             'required' => ['sku', 'name', 'category', 'selling_price'],
         ],
         'customers' => [
@@ -200,6 +200,7 @@ function csv_import_validate(string $type, string $csv, string $mode = 'skip'): 
             $category = $value($row, $map, 'category');
             $selling = $value($row, $map, 'selling_price');
             $buying = $value($row, $map, 'buying_price', '0');
+            $vatRate = $value($row, $map, 'vat_rate', (string)VAT_RATE);
             $quantity = $value($row, $map, 'quantity', '0');
             $reorder = $value($row, $map, 'reorder_level', '5');
             $supplierName = $value($row, $map, 'supplier');
@@ -209,6 +210,7 @@ function csv_import_validate(string $type, string $csv, string $mode = 'skip'): 
             if ($category === '') $rowErrors[] = 'category is required';
             if ($selling === '' || !is_numeric($selling) || (float)$selling < 0) $rowErrors[] = 'selling_price must be a non-negative number';
             if (!is_numeric($buying) || (float)$buying < 0) $rowErrors[] = 'buying_price must be a non-negative number';
+            if (!is_numeric($vatRate) || (float)$vatRate < 0 || (float)$vatRate > 1) $rowErrors[] = 'vat_rate must be between 0 and 1';
             if (!is_numeric($quantity) || (int)$quantity < 0) $rowErrors[] = 'quantity must be a non-negative whole number';
             if (!is_numeric($reorder) || (int)$reorder < 0) $rowErrors[] = 'reorder_level must be a non-negative whole number';
 
@@ -252,6 +254,7 @@ function csv_import_validate(string $type, string $csv, string $mode = 'skip'): 
                     'brand' => $value($row, $map, 'brand'),
                     'buying_price' => (float)$buying,
                     'selling_price' => (float)$selling,
+                    'vat_rate' => (float)$vatRate,
                     'quantity' => (int)$quantity,
                     'reorder_level' => (int)$reorder,
                     'warehouse' => $value($row, $map, 'warehouse', 'Main'),
@@ -325,17 +328,22 @@ function csv_import_commit(string $type, string $csv, string $mode, string $acto
     }
 
     $pdo = db();
-    $pdo->beginTransaction();
+    db_begin_immediate();
     try {
         if ($type === 'products') {
             $insert = $pdo->prepare('INSERT INTO products(sku, barcode, name, category, brand, buying_price, selling_price, quantity, reorder_level, warehouse, branch, supplier_id, supplied_quantity, vat_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-            $update = $pdo->prepare('UPDATE products SET barcode = ?, name = ?, category = ?, brand = ?, buying_price = ?, selling_price = ?, reorder_level = ?, warehouse = ?, branch = ?, supplier_id = ? WHERE sku = ?');
+            $update = $pdo->prepare('UPDATE products SET barcode = ?, name = ?, category = ?, brand = ?, buying_price = ?, selling_price = ?, vat_rate = ?, reorder_level = ?, warehouse = ?, branch = ?, supplier_id = ? WHERE sku = ?');
+            $movement = $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference) VALUES(?,?,?,?)');
             foreach ($result['records'] as $record) {
                 $d = $record['data'];
                 if ($record['action'] === 'insert') {
-                    $insert->execute([$d['sku'], $d['barcode'], $d['name'], $d['category'], $d['brand'], $d['buying_price'], $d['selling_price'], $d['quantity'], $d['reorder_level'], $d['warehouse'], $d['branch'], $d['supplier_id'], $d['quantity'], VAT_RATE]);
+                    $insert->execute([$d['sku'], $d['barcode'], $d['name'], $d['category'], $d['brand'], money_to_minor($d['buying_price']), money_to_minor($d['selling_price']), $d['quantity'], $d['reorder_level'], $d['warehouse'], $d['branch'], $d['supplier_id'], $d['quantity'], $d['vat_rate']]);
+                    $productId = (int)$pdo->lastInsertId();
+                    if ((int)$d['quantity'] > 0) {
+                        $movement->execute([$productId, (int)$d['quantity'], 'OPENING', 'csv-import']);
+                    }
                 } elseif ($record['action'] === 'update') {
-                    $update->execute([$d['barcode'], $d['name'], $d['category'], $d['brand'], $d['buying_price'], $d['selling_price'], $d['reorder_level'], $d['warehouse'], $d['branch'], $d['supplier_id'], $record['id']]);
+                    $update->execute([$d['barcode'], $d['name'], $d['category'], $d['brand'], money_to_minor($d['buying_price']), money_to_minor($d['selling_price']), $d['vat_rate'], $d['reorder_level'], $d['warehouse'], $d['branch'], $d['supplier_id'], $record['id']]);
                 }
             }
         } else {
@@ -350,10 +358,10 @@ function csv_import_commit(string $type, string $csv, string $mode, string $acto
                 }
             }
         }
-        $pdo->commit();
+        db_commit();
     } catch (Throwable $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
+        if (db_in_transaction()) {
+            db_rollback();
         }
         throw $e;
     }

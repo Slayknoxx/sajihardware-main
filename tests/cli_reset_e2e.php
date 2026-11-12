@@ -60,6 +60,7 @@ $cleanup = static function () use ($tmp): void {
 
 try {
     init_db();
+    $initialSessionVersion = (int)db()->query('SELECT session_version FROM users WHERE username="admin"')->fetchColumn();
     db_close();
 
     [$code, $stdout, $stderr] = run_reset(['--user=admin', '--password=NewSecret123!'], $tmp);
@@ -67,8 +68,8 @@ try {
     check('CLI reset confirms the account', str_contains($stdout, 'Password reset for admin'), $stdout);
     $hash = (string)db()->query('SELECT password_hash FROM users WHERE username="admin"')->fetchColumn();
     check('CLI reset sets the supplied password', password_verify('NewSecret123!', $hash));
-    check('CLI reset forces a password change', (int)db()->query('SELECT must_change_password FROM users WHERE username="admin"')->fetchColumn() === 1);
-    check('CLI reset bumps the session version', (int)db()->query('SELECT session_version FROM users WHERE username="admin"')->fetchColumn() === 1);
+    check('CLI reset does not force a password change', (int)db()->query('SELECT must_change_password FROM users WHERE username="admin"')->fetchColumn() === 0);
+    check('CLI reset bumps the session version', (int)db()->query('SELECT session_version FROM users WHERE username="admin"')->fetchColumn() === $initialSessionVersion + 1);
     db_close();
 
     [$code, $stdout, $stderr] = run_reset(['--user=admin'], $tmp);

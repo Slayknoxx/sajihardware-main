@@ -75,7 +75,7 @@ define('DB_PATH', DATA_PATH . DIRECTORY_SEPARATOR . (string)env_value('SAJI_DB_F
 define('BACKUP_PATH', (string)env_value('SAJI_BACKUP_PATH', DATA_PATH . DIRECTORY_SEPARATOR . 'backups'));
 define('LOGO_WEB_PATH', 'assets/saji-logo.png');
 
-define('ETIMS_ENABLED', env_bool('ETIMS_ENABLED', true));
+define('ETIMS_ENABLED', env_bool('ETIMS_ENABLED', false));
 define('KRA_PIN', env_value('KRA_PIN', 'YOUR_KRA_PIN_HERE'));
 define('VSCU_SERIAL', env_value('VSCU_SERIAL', 'VSCU_SERIAL_NUMBER'));
 define('VSCU_VERIFICATION_KEY', env_value('VSCU_VERIFICATION_KEY', 'your-long-random-verification-key'));
@@ -102,3 +102,40 @@ define('ETIMS_CONFIG', [
     'branch_id' => env_value('ETIMS_BRANCH_ID', '01'),
     'device_serial' => VSCU_SERIAL,
 ]);
+
+function config_is_placeholder_value(mixed $value): bool
+{
+    if (!is_scalar($value) && $value !== null) {
+        return false;
+    }
+    $text = trim((string)$value);
+    if ($text === '') {
+        return false;
+    }
+
+    $upper = strtoupper($text);
+    foreach (['YOUR_', 'PASTE_', 'ADD_', 'CHANGE_', 'HTTPS://YOUR-', 'YOUR-NGROK-URL.EXAMPLE'] as $needle) {
+        if (str_contains($upper, $needle)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function validate_runtime_configuration(): void
+{
+    if (ETIMS_ENABLED) {
+        foreach (['KRA_PIN', 'VSCU_SERIAL', 'VSCU_VERIFICATION_KEY', 'VSCU_DEVICE_ID'] as $setting) {
+            if (config_is_placeholder_value(constant($setting))) {
+                throw new RuntimeException("ETIMS is enabled but {$setting} is still set to a placeholder value. Update the settings in .env or config.php.");
+            }
+        }
+
+        if (config_is_placeholder_value(ETIMS_CONFIG['base_url'])) {
+            throw new RuntimeException('ETIMS is enabled but ETIMS_BASE_URL is unset or still points to a placeholder value.');
+        }
+    }
+}
+
+validate_runtime_configuration();

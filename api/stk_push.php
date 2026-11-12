@@ -19,9 +19,9 @@ try {
     $reference = trim((string)($data['reference'] ?? ''));
     $phoneRaw = trim((string)($data['phone'] ?? ''));
     $phone = normalize_phone($phoneRaw);
-    $amount = round((float)($data['amount'] ?? 0), 2);
+    $amountCents = money_to_minor($data['amount'] ?? 0);
 
-    if ($saleId < 1 || $reference === '' || $phone === '' || $amount <= 0) {
+    if ($saleId < 1 || $reference === '' || $phone === '' || $amountCents <= 0) {
         payment_json(['error' => 'sale_id, reference, phone, and amount are required.'], 400);
     }
 
@@ -35,17 +35,33 @@ try {
     if (!$sale || $sale['payment_method'] !== 'M-Pesa' || $sale['status'] !== 'PENDING_PAYMENT') {
         payment_json(['error' => 'Sale is not waiting for M-Pesa payment.'], 409);
     }
-    if (!hash_equals((string)$sale['payment_reference'], $reference) || abs((float)$sale['total'] - $amount) > 0.01) {
+    if (!hash_equals((string)$sale['payment_reference'], $reference) || (int)$sale['total'] !== $amountCents) {
         payment_json(['error' => 'Payment reference or amount does not match the sale.'], 409);
+    }
+    if ((int)$sale['total'] % 100 !== 0) {
+        payment_json(['error' => 'M-Pesa requires a whole-shilling sale total. Adjust the discount and retry.'], 422);
     }
 
     $payments = payment_db();
+    $existingPayment = $payments->prepare('SELECT status, checkout_request_id, merchant_request_id FROM payments WHERE payment_reference=?');
+    $existingPayment->execute([$reference]);
+    $previous = $existingPayment->fetch();
+    if ($previous && in_array($previous['status'], ['STK_SENT', 'PAID'], true)) {
+        payment_json([
+            'ok' => true,
+            'payment_status' => $previous['status'],
+            'sale_id' => $saleId,
+            'reference' => $reference,
+            'checkout_request_id' => $previous['checkout_request_id'],
+            'poll_seconds' => PAYMENT_POLL_TIMEOUT_SECONDS,
+        ]);
+    }
     $payments->beginTransaction();
     $stmt = $payments->prepare('INSERT INTO payments(local_sale_id, receipt_no, payment_reference, phone, amount, status) VALUES(?,?,?,?,?,?) ON CONFLICT(payment_reference) DO UPDATE SET phone=excluded.phone, amount=excluded.amount, updated_at=CURRENT_TIMESTAMP');
-    $stmt->execute([$saleId, $sale['receipt_no'], $reference, $phone, $amount, 'PENDING']);
+    $stmt->execute([$saleId, $sale['receipt_no'], $reference, $phone, $amountCents, 'PENDING']);
     $payments->commit();
 
-    $amountStr = (string)intval($amount);
+    $amountStr = (string)intdiv((int)$sale['total'], 100);
     $result = kcb_stk_push($phone, $amountStr, $reference, 'SAJI Hardware payment ' . $sale['receipt_no']);
 
     $flattenResponse = function (mixed $value) use (&$flattenResponse): array {

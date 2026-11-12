@@ -86,3 +86,50 @@ define('KCB_CALLBACK_SECRET', CALLBACK_SECRET);
 define('KCB_CALLBACK_TOKEN', APP_SECRET);
 define('PAYMENT_POLL_TIMEOUT_SECONDS', env_int('PAYMENT_POLL_TIMEOUT_SECONDS', 90));
 define('KCB_TIMEOUT_SECONDS', env_int('KCB_TIMEOUT_SECONDS', 20));
+
+function payment_config_is_placeholder_value(mixed $value): bool
+{
+    if (!is_scalar($value) && $value !== null) {
+        return false;
+    }
+    $text = trim((string)$value);
+    if ($text === '') {
+        return false;
+    }
+
+    $upper = strtoupper($text);
+    foreach (['YOUR_', 'PASTE_', 'ADD_', 'CHANGE_', 'HTTPS://YOUR-', 'YOUR-NGROK-URL.EXAMPLE'] as $needle) {
+        if (str_contains($upper, $needle)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function validate_payment_configuration(): void
+{
+    if (!KCB_BUNI_ENABLED) {
+        return;
+    }
+
+    foreach (['KCB_CONSUMER_KEY', 'KCB_CONSUMER_SECRET', 'KCB_ORG_SHORT_CODE'] as $setting) {
+        if (payment_config_is_placeholder_value(constant($setting))) {
+            throw new RuntimeException("KCB Buni is enabled but {$setting} still contains a placeholder value.");
+        }
+    }
+
+    if (CALLBACK_SECRET === '' || payment_config_is_placeholder_value(CALLBACK_SECRET)) {
+        throw new RuntimeException('KCB Buni is enabled but CALLBACK_SECRET is missing or still set to a placeholder value.');
+    }
+
+    if (APP_SECRET === '' || payment_config_is_placeholder_value(APP_SECRET)) {
+        throw new RuntimeException('KCB Buni is enabled but APP_SECRET is missing or still set to a placeholder value.');
+    }
+
+    if (payment_config_is_placeholder_value(CALLBACK_URL)) {
+        throw new RuntimeException('KCB Buni is enabled but CALLBACK_URL is still set to a placeholder value.');
+    }
+}
+
+validate_payment_configuration();

@@ -123,14 +123,14 @@ class VsculEtims
                 return [
                     'description' => $item['product_name'] ?? 'Product',
                     'quantity' => (float)$item['quantity'],
-                    'unit_price' => (float)$item['unit_price'],
-                    'total_excluding_tax' => (float)$item['total'],
+                    'unit_price' => function_exists('money_minor_to_major') ? money_minor_to_major($item['unit_price']) : (float)$item['unit_price'],
+                    'total_excluding_tax' => function_exists('money_minor_to_major') ? money_minor_to_major($item['total']) : (float)$item['total'],
                 ];
             }, $items),
             'totals' => [
-                'total_excluding_tax' => (float)$saleData['subtotal'],
-                'tax_amount' => (float)$saleData['tax'],
-                'total_including_tax' => (float)$saleData['total'],
+                'total_excluding_tax' => function_exists('money_minor_to_major') ? money_minor_to_major($saleData['subtotal']) : (float)$saleData['subtotal'],
+                'tax_amount' => function_exists('money_minor_to_major') ? money_minor_to_major($saleData['tax']) : (float)$saleData['tax'],
+                'total_including_tax' => function_exists('money_minor_to_major') ? money_minor_to_major($saleData['total']) : (float)$saleData['total'],
             ],
             'seller_details' => [
                 'pin' => $this->pin,
@@ -246,23 +246,33 @@ class VsculEtims
      */
     public function formatReceiptForPrinting(array $saleData, array $items, string $qrCode): array
     {
-        $subtotal = (float)$saleData['subtotal'];
-        $tax = (float)$saleData['tax'];
-        $total = (float)$saleData['total'];
+        $subtotal = function_exists('money_minor_to_major') ? money_minor_to_major($saleData['subtotal']) : (float)$saleData['subtotal'];
+        $tax = function_exists('money_minor_to_major') ? money_minor_to_major($saleData['tax']) : (float)$saleData['tax'];
+        $total = function_exists('money_minor_to_major') ? money_minor_to_major($saleData['total']) : (float)$saleData['total'];
+        $formattedItems = array_map(static function (array $item): array {
+            if (function_exists('money_minor_to_major')) {
+                foreach (['unit_price', 'total'] as $field) {
+                    if (isset($item[$field])) {
+                        $item[$field] = money_minor_to_major($item[$field]);
+                    }
+                }
+            }
+            return $item;
+        }, $items);
         
         return [
             'receipt_number' => $saleData['receipt_no'],
             'date_time' => $saleData['created_at'],
             'cashier' => $saleData['cashier_name'],
             'customer' => $saleData['customer_name'],
-            'items' => $items,
+            'items' => $formattedItems,
             'subtotal' => $subtotal,
             'vat_amount' => $tax,
-            'vat_rate' => 16,
+            'vat_rate' => (float)($saleData['vat_rate'] ?? 0.16) * 100,
             'total_amount' => $total,
             'payment_method' => $saleData['payment_method'],
-            'amount_paid' => $saleData['amount_paid'],
-            'change_due' => $saleData['change_due'],
+            'amount_paid' => function_exists('money_minor_to_major') ? money_minor_to_major($saleData['amount_paid']) : (float)$saleData['amount_paid'],
+            'change_due' => function_exists('money_minor_to_major') ? money_minor_to_major($saleData['change_due']) : (float)$saleData['change_due'],
             'qr_code' => $qrCode,
             'etims_status' => $saleData['etims_status'] ?? 'PENDING',
             'etims_unique_id' => $saleData['etims_unique_id'] ?? 'Not yet assigned',

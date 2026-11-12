@@ -70,15 +70,16 @@ try {
     check('supplier row exists', (int)db()->query("SELECT COUNT(*) FROM suppliers WHERE name='Acme Supplies'")->fetchColumn() === 1);
 
     // Product preview and commit, including a quoted comma in the name.
-    $productCsv = "sku,barcode,name,category,brand,buying_price,selling_price,quantity,reorder_level,warehouse,branch,supplier\n"
-        . "IMP-1,111,\"Cement, 50kg\",Building,Bamburi,600,750,10,2,Main,Main,Acme Supplies\n"
-        . "IMP-2,222,PVC Pipe,Plumbing,Generic,100,150,5,1,Main,Main,\n";
+    $productCsv = "sku,barcode,name,category,brand,buying_price,selling_price,quantity,reorder_level,warehouse,branch,supplier,vat_rate\n"
+        . "IMP-1,111,\"Cement, 50kg\",Building,Bamburi,600,750,10,2,Main,Main,Acme Supplies,0.05\n"
+        . "IMP-2,222,PVC Pipe,Plumbing,Generic,100,150,5,1,Main,Main,,0.16\n";
     $preview = csv_import_validate('products', $productCsv, 'skip');
     check('product preview counts rows', $preview['total'] === 2 && $preview['insert'] === 2 && $preview['errors'] === [], json_encode($preview['errors']));
     check('quoted comma is parsed', $preview['rows'][0]['summary'] === 'IMP-1 Cement, 50kg', $preview['rows'][0]['summary']);
     $inserted = csv_import_commit('products', $productCsv, 'skip', 'test');
     check('product import inserts', $inserted['insert'] === 2, (string)$inserted['insert']);
     check('product supplier was linked', (int)db()->query('SELECT supplier_id FROM products WHERE sku="IMP-1"')->fetchColumn() > 0);
+    check('CSV imports product VAT rate', (float)db()->query('SELECT vat_rate FROM products WHERE sku="IMP-1"')->fetchColumn() === 0.05);
 
     // Duplicate handling: skip by default, update when requested.
     $skip = csv_import_commit('products', $productCsv, 'skip', 'test');
@@ -87,13 +88,13 @@ try {
     $updated = csv_import_commit('products', $updateCsv, 'update', 'test');
     check('existing product is updated', $updated['update'] === 1, json_encode($updated));
     $row = db()->query('SELECT selling_price, quantity FROM products WHERE sku="IMP-1"')->fetch();
-    check('update changes price but preserves stock', (float)$row['selling_price'] === 800.0 && (int)$row['quantity'] === 10, json_encode($row));
+    check('update changes price but preserves stock', (int)$row['selling_price'] === 80000 && (int)$row['quantity'] === 10, json_encode($row));
 
     // SKU matching is case-insensitive but the stored SKU casing stays intact.
     $caseCsv = "sku,name,category,selling_price\nimp-1,\"Cement, 50kg\",Building,810\n";
     $caseUpdate = csv_import_commit('products', $caseCsv, 'update', 'test');
     $row = db()->query('SELECT sku, selling_price FROM products WHERE sku="IMP-1"')->fetch();
-    check('lowercase sku updates the existing product', $caseUpdate['update'] === 1 && (float)$row['selling_price'] === 810.0 && $row['sku'] === 'IMP-1', json_encode([$caseUpdate, $row]));
+    check('lowercase sku updates the existing product', $caseUpdate['update'] === 1 && (int)$row['selling_price'] === 81000 && $row['sku'] === 'IMP-1', json_encode([$caseUpdate, $row]));
 
     // Invalid row blocks the whole file.
     $productsBefore = (int)db()->query('SELECT COUNT(*) FROM products')->fetchColumn();
@@ -114,6 +115,26 @@ try {
     check('customer import inserts', $customers['insert'] === 1, json_encode($customers));
     $customer = db()->query('SELECT name, email FROM customers WHERE phone="0722222222"')->fetch();
     check('quoted customer name is preserved', $customer['name'] === 'Shop, Ltd' && $customer['email'] === 'shop@example.com');
+
+    // Monetary precision, stock ledger, logging and repeat initialization.
+    check('KES monetary values are stored as cents', money_to_minor('12.34') === 1234 && money_minor_to_major(1234) === 12.34);
+    check('API monetary values are formatted back to KES', money_json_format(['total' => 1234])['total'] === 12.34);
+    check('default role permissions protect cost prices', !role_has_permission('EMPLOYEE', 'cost.view') && role_has_permission('ADMIN', 'cost.view'));
+    check('daily stock ledger reconciliation passes', run_integrity_checks()['status'] === 'OK');
+    app_log('phase2 smoke log', false, 'info');
+    $log = file_get_contents($tmp . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . 'app.log');
+    $logRecord = json_decode(trim((string)$log), true);
+    check('application log uses structured JSON lines', is_array($logRecord) && $logRecord['level'] === 'info' && $logRecord['message'] === 'phase2 smoke log');
+    db()->prepare('DELETE FROM schema_migrations WHERE version=2')->execute();
+    $adminHash = hash_password_local('Changed-admin-password');
+    db()->prepare('UPDATE users SET password_hash=?, must_change_password=1 WHERE username=?')->execute([$adminHash, 'admin']);
+    init_db();
+    $admin = db()->query("SELECT password_hash, must_change_password FROM users WHERE username='admin'")->fetch();
+    check('authentication migration restores the default admin login without forcing a change', verify_password_local('admin123', (string)$admin['password_hash']) && (int)$admin['must_change_password'] === 0);
+    db()->prepare('UPDATE users SET password_hash=? WHERE username=?')->execute([$adminHash, 'admin']);
+    init_db();
+    $savedAdminHash = db()->query("SELECT password_hash FROM users WHERE username='admin'")->fetchColumn();
+    check('default admin reset runs only once', verify_password_local('Changed-admin-password', (string)$savedAdminHash));
 
     // Reset helpers.
     check('temporary password is long enough', strlen(generate_temp_password()) >= 10);

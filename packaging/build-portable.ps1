@@ -77,7 +77,7 @@ SAJI Hardware POS $version - portable build
 
 1. Double-click start-saji-pos.bat
 2. Your browser opens at http://127.0.0.1:8000
-3. Default login: admin / admin123 (you will be asked to change it)
+3. Default login: admin / admin123
 
 Data is stored in the data folder next to this file. Back it up regularly.
 If port 8000 is already in use, edit start-saji-pos.bat and change both

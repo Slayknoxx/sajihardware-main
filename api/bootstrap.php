@@ -22,8 +22,26 @@ function payment_json(array $data, int $status = 200): never
 {
     http_response_code($status);
     header('Content-Type: application/json');
-    echo json_encode($data, JSON_PRETTY_PRINT);
+    echo json_encode(function_exists('money_json_format') ? money_json_format($data) : $data, JSON_PRETTY_PRINT);
     exit;
+}
+
+function redact_sensitive_value(mixed $value): mixed
+{
+    if (!is_array($value)) {
+        return $value;
+    }
+
+    foreach ($value as $key => $item) {
+        $keyLower = strtolower((string)$key);
+        if (str_contains($keyLower, 'token') || str_contains($keyLower, 'secret') || str_contains($keyLower, 'password') || str_contains($keyLower, 'phone') || str_contains($keyLower, 'receipt') || str_contains($keyLower, 'reference') || str_contains($keyLower, 'code')) {
+            $value[$key] = '[REDACTED]';
+            continue;
+        }
+        $value[$key] = redact_sensitive_value($item);
+    }
+
+    return $value;
 }
 
 function payment_input(): array
@@ -40,13 +58,14 @@ function require_payment_user(): array
 
 function require_callback_token(): void
 {
-    $token = (string)($_GET['token'] ?? '');
+    $token = trim((string)($_GET['token'] ?? ''));
     if ($token === '') {
-        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
-        $path = parse_url($requestUri, PHP_URL_PATH) ?: '';
-        $segments = array_values(array_filter(explode('/', trim($path, '/')), static fn ($segment) => $segment !== ''));
-        if ($segments !== []) {
-            $token = (string)end($segments);
+        $token = trim((string)($_SERVER['HTTP_X_CALLBACK_TOKEN'] ?? ''));
+    }
+    if ($token === '') {
+        $authHeader = trim((string)($_SERVER['HTTP_AUTHORIZATION'] ?? ''));
+        if (preg_match('/^Bearer\s+(.+)$/i', $authHeader, $m)) {
+            $token = trim($m[1]);
         }
     }
 
@@ -106,11 +125,17 @@ function kcb_http(string $url, array $headers, ?array $payload = null): array
     curl_close($curl);
 
     if (defined('KCB_DEBUG') && KCB_DEBUG) {
+        $debugHeaders = [];
+        foreach ($headers as $header) {
+            $debugHeaders[] = preg_match('/^(Authorization|X-.*Token|Cookie|Set-Cookie):/i', $header) ? preg_replace('/(:\s*)(.+)$/', '$1[REDACTED]', $header) : $header;
+        }
+
+        $debugPayload = is_array($payload) ? redact_sensitive_value($payload) : $payload;
         $debugMessage = "[KCB_DEBUG] URL=" . $url . "\n";
         $debugMessage .= "[KCB_DEBUG] STATUS=" . $status . "\n";
         $debugMessage .= "[KCB_DEBUG] ERROR=" . ($error !== '' ? $error : 'none') . "\n";
-        $debugMessage .= "[KCB_DEBUG] HEADERS=" . json_encode($headers) . "\n";
-        $debugMessage .= "[KCB_DEBUG] PAYLOAD=" . json_encode($payload) . "\n";
+        $debugMessage .= "[KCB_DEBUG] HEADERS=" . json_encode($debugHeaders) . "\n";
+        $debugMessage .= "[KCB_DEBUG] PAYLOAD=" . json_encode($debugPayload) . "\n";
         $debugMessage .= "[KCB_DEBUG] BODY=" . substr((string)$body, 0, 1500) . "\n";
         error_log($debugMessage);
     }
@@ -176,5 +201,7 @@ function restore_stock_for_failed_sale(int $saleId): void
     $items->execute([$saleId]);
     foreach ($items->fetchAll() as $item) {
         db()->prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?')->execute([(int)$item['quantity'], (int)$item['product_id']]);
+        db()->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference) VALUES(?,?,?,?)')
+            ->execute([(int)$item['product_id'], (int)$item['quantity'], 'PAYMENT_FAILED', 'sale-' . $saleId]);
     }
 }

@@ -135,7 +135,7 @@ Default admin user:
 - Username: admin
 - Password: admin123
 
-Change it after the first login.
+This account signs in directly without a forced password-change step.
 
 ### Step 6: Offline use
 
@@ -337,6 +337,36 @@ Example:
 ```bash
 cp /var/www/saji-pos/data/saji_pos.sqlite3 /backup/saji-pos-$(date +%F).sqlite3
 ```
+
+## 7. Database integrity monitoring
+
+The application runs a bounded integrity check at most once per UTC day when an
+authenticated user is active. The check verifies SQLite integrity, foreign keys,
+negative stock and agreement between product quantities and the stock-movement
+ledger. Results are available to administrators under **Admin → System health**.
+On the first launch after upgrading, the application applies its versioned
+database migration, which converts existing monetary values to integer cents.
+Take and verify a backup before upgrading; do not manually multiply database
+values. Product CSV prices remain entered in KES, and `vat_rate` is a fraction
+(for example, `0.16` for 16%).
+
+For Windows installations, add a daily task in Task Scheduler:
+
+1. Select **Create Basic Task** and choose a daily trigger.
+2. Set the action to **Start a program**.
+3. Use your PHP CLI executable as the program (for example,
+   `C:\xampp\php\php.exe`).
+4. Set arguments to
+   `-c "C:\xampp\php\php.ini" "C:\xampp\htdocs\sarihardware\scripts\check_integrity.php"`.
+   Replace both paths with the actual PHP and project locations.
+5. Set **Start in** to the project root (for example,
+   `C:\xampp\htdocs\sarihardware`) and run the task with the same account that
+   can write to the app's `data` directory.
+
+The scheduled task and the in-app daily fallback use the same local database
+and persist their results in `integrity_runs`. A non-zero task exit code means
+the database has findings or the check could not run; see `data\logs\app.log`
+for operational errors.
 
 On Windows:
 

@@ -33,9 +33,8 @@ branding, the setup wizard, and CSV import followed in Phase 2 (below). See
 - CSRF tokens on every mutating API call, origin checks, login throttling, and
   hardening headers (CSP, `X-Content-Type-Options: nosniff`, frame and referrer
   policy).
-- Forced password change is enforced server-side (`403 PASSWORD_CHANGE_REQUIRED`),
-  not just in the UI. Default and temporary passwords must be changed, and the
-  minimum length is 10 characters.
+- Default and admin-issued reset passwords are active immediately. There is no
+  forced or self-service password-change screen.
 - Sessions are revalidated against the users table on every request, so deleted
   or deactivated accounts lose access. The session ID is regenerated on login to
   prevent fixation.
@@ -109,7 +108,7 @@ To run it against an already-running server, start
 `tests\http_smoke.ps1` directly.
 
 Coverage at completion: 17 Phase 1 smoke checks, 16 restore checks, 17 licensing
-state checks, and 39 HTTP checks (including traversal, CSRF, password gate,
+state checks, and HTTP checks (including traversal, CSRF, immediate login,
 backup/restore, CSV import, and password-reset endpoints).
 
 ### Issue A License
@@ -136,8 +135,7 @@ key off the build machine and delete local copies once customer keys are issued.
 
 ### First-Run Setup Wizard
 
-- After an admin signs in and clears the forced password change, the setup wizard
-  opens while `setup_completed` is not `1`.
+- After an admin signs in, the setup wizard opens while `setup_completed` is not `1`.
 - It collects the business profile, the first branch, and an optional license key,
   then saves everything through the `save_setup` API action.
 - **Later** hides the wizard without marking setup complete, so it returns on the
@@ -153,11 +151,47 @@ key off the build machine and delete local copies once customer keys are issued.
 - Product updates change descriptive fields and prices but never overwrite stock.
 - Limits: 5,000 data rows per file, 200 preview rows shown.
 
+### Money And Checkout Safety
+
+- Monetary values are stored as integer minor units (cents) to avoid floating
+  point arithmetic errors; API responses convert amounts back to display units.
+- Checkout recalculates prices, discounts, VAT, totals, and change on the server
+  using current product records. It validates payment inputs and checks stock
+  again inside the sale transaction before deducting inventory.
+- Checkout requests require an idempotency key. Retrying the same request returns
+  the original result instead of creating a duplicate sale; reusing a key with
+  different sale details is rejected.
+- Sales, stock deductions, stock ledger entries, and the saved checkout result
+  are committed together, so failed checkouts do not leave partial updates.
+
+### Roles, Sessions, And Audit History
+
+- **Admin → Role & session settings** controls the idle session timeout
+  (5–1,440 minutes) and Manager/Employee permissions for voiding sales, viewing
+  cost prices, deleting records, and maximum discount percentages. Admin
+  permissions remain unrestricted.
+- Session permissions and account status are checked against the database on
+  authenticated requests. Password resets invalidate existing sessions.
+- Administrative and business actions—including sales, user/password changes,
+  imports, settings, and backup operations—are recorded in the audit log.
+  Admins can search and page through the log in the app.
+
+### Health, Integrity, And Application Logs
+
+- The health endpoint provides a basic availability check. Admin **System
+  health** reports SQLite integrity, foreign-key violations, the latest
+  integrity-check findings, the last backup, and application-log size.
+- Scheduled integrity checks inspect SQLite, foreign keys, stock totals against
+  the movement ledger, and negative stock; findings are stored and surfaced to
+  admins.
+- Application logs use structured JSON lines, redact sensitive messages, and
+  rotate at a size limit.
+
 ### Account Recovery
 
-- Admins can reset another user's password from **Admin → Employee accounts**.
-  A strong temporary password is shown once, the user is signed out, and
-  `must_change_password` forces a change at next login.
+- Admins can reset any user's password from **Admin → Employee accounts**.
+  A strong temporary password is shown once and the user is signed out. Admins
+  can also reset their own account and sign in again with the new password.
 - Break-glass CLI recovery works without the web server or a session:
 
 ```powershell
@@ -176,9 +210,11 @@ php -c .\php-runtime.ini tests\cli_reset_e2e.php
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_http_smoke.ps1
 ```
 
-Coverage at completion: 21 Phase 2 checks, 9 CLI recovery checks, and the 39-check
-HTTP suite above (which now also covers import preview and password-reset session
-invalidation).
+The suites cover Phase 2 behavior, CLI password recovery, HTTP login without a
+forced-change gate, CSRF, health headers, backups, imports, and password-reset
+session invalidation. Phase 2 smoke checks also cover money conversion,
+permissions, integrity checks, structured logging, and the one-time admin
+credential reset.
 
 ## Default Login
 
@@ -187,8 +223,9 @@ Username: admin
 Password: admin123
 ```
 
-The app now forces a password change on first login. Set a new password of at
-least 10 characters in Settings before real use.
+The app does not force a password change at login.
+On the first app request after this update, a one-time migration resets the
+existing `admin` account to these credentials and clears its login lockout.
 
 ## Run Locally
 

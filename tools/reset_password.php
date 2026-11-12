@@ -11,7 +11,7 @@ declare(strict_types=1);
  *   php -c .\php-runtime.ini tools\reset_password.php --user=admin --password="NewSecret123!"
  *
  * When --password is omitted a strong temporary password is generated and
- * printed once. The account is always forced to change it at next login.
+ * printed once. Password changes are not forced at login.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -65,7 +65,7 @@ try {
         exit(1);
     }
 
-    db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 1, session_version = session_version + 1 WHERE id = ?')
+    db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 0, session_version = session_version + 1 WHERE id = ?')
         ->execute([hash_password_local($password), (int)$account['id']]);
     db()->prepare('DELETE FROM login_attempts WHERE username = ?')->execute([$username]);
     audit('cli', 'PASSWORD_RESET_CLI', (string)$account['username']);
@@ -76,7 +76,7 @@ try {
     } else {
         echo "The supplied password is active.\n";
     }
-    echo "The user must change it at next login.\n";
+    echo "The password is active immediately.\n";
     exit(0);
 } catch (Throwable $e) {
     fwrite(STDERR, 'Password reset failed: ' . $e->getMessage() . "\n");

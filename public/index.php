@@ -87,6 +87,10 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <div class="section-heading"><h2>Held sales</h2><span class="muted">Continue a sale saved for later</span></div>
                 <div id="heldSalesList"></div>
             </section>
+            <section class="panel held-sales-panel">
+                <h2>Recent sales</h2>
+                <div id="salesHistoryTable" class="table-wrap"></div>
+            </section>
         </section>
 
         <section id="products" class="view hidden">
@@ -102,6 +106,7 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <input name="branch" placeholder="Branch" value="Main">
                 <input name="buying_price" type="number" min="0" step="0.01" placeholder="Buying price" required>
                 <input name="selling_price" type="number" min="0" step="0.01" placeholder="Selling price" required>
+                <input name="vat_rate" type="number" min="0" max="1" step="0.01" value="0.16" placeholder="VAT rate (0.16 = 16%)" required>
                 <input name="quantity" type="number" min="0" step="1" placeholder="Stock quantity" required>
                 <input name="reorder_level" type="number" min="0" step="1" placeholder="Reorder level" value="5">
                 <div class="supplier-picker"><select name="supplier_id" id="productSupplier"><option value="">Supplier (optional)</option></select><button id="newSupplierBtn" class="secondary" type="button">New supplier</button></div>
@@ -175,6 +180,15 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <div id="importPreviewResult" class="table-wrap"></div>
             </section>
             <div id="adminTables" class="panel table-wrap"></div>
+            <section id="systemHealthPanel" class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>System health</h2><button id="healthRefreshBtn" class="secondary" type="button">Refresh</button></div>
+                <div id="systemHealth"></div>
+            </section>
+            <section id="auditPanel" class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>Audit history</h2><div class="toolbar"><input id="auditSearch" placeholder="Search actor, action, details"><button id="auditSearchBtn" class="secondary" type="button">Search</button></div></div>
+                <div id="auditTable" class="table-wrap"></div>
+                <div class="button-row"><button id="auditPreviousBtn" class="secondary" type="button">Previous</button><span id="auditPageLabel" class="muted"></span><button id="auditNextBtn" class="secondary" type="button">Next</button></div>
+            </section>
         </section>
 
         <section id="reports" class="view hidden">
@@ -193,7 +207,25 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         </section>
 
         <section id="settings" class="view hidden">
-            <form id="passwordForm" class="panel settings-panel"><h2>Change password</h2><input name="current_password" type="password" placeholder="Current password"><input name="new_password" type="password" placeholder="New password (min 10 characters)" minlength="10"><button class="primary">Update password</button></form>
+            <form id="roleSettingsForm" class="panel settings-panel admin-only" style="margin-top:16px">
+                <h2>Sessions &amp; permissions</h2>
+                <label>Session timeout (minutes)<input id="sessionTimeoutMinutes" type="number" min="5" max="1440" required></label>
+                <div class="cards-2">
+                    <fieldset><legend>Manager</legend>
+                        <label class="inline-check"><input id="managerSaleVoid" type="checkbox"> Void completed sales</label>
+                        <label class="inline-check"><input id="managerCostView" type="checkbox"> View cost prices</label>
+                        <label class="inline-check"><input id="managerRecordsDelete" type="checkbox"> Delete customer/supplier/quotation records</label>
+                        <label>Maximum discount (%)<input id="managerDiscountLimit" type="number" min="0" max="100" required></label>
+                    </fieldset>
+                    <fieldset><legend>Employee</legend>
+                        <label class="inline-check"><input id="employeeSaleVoid" type="checkbox"> Void completed sales</label>
+                        <label class="inline-check"><input id="employeeCostView" type="checkbox"> View cost prices</label>
+                        <label class="inline-check"><input id="employeeRecordsDelete" type="checkbox"> Delete customer/supplier/quotation records</label>
+                        <label>Maximum discount (%)<input id="employeeDiscountLimit" type="number" min="0" max="100" required></label>
+                    </fieldset>
+                </div>
+                <button class="primary">Save session and permission settings</button>
+            </form>
             <section id="licensePanel" class="panel settings-panel" style="margin-top:16px">
                 <h2>License</h2>
                 <div id="licenseStatus" class="license-status">Loading…</div>
@@ -224,15 +256,6 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
 </section>
 
 <div id="toast"></div>
-<div id="forcedPasswordModal" class="hidden payment-loading-backdrop" aria-live="polite">
-    <form id="forcedPasswordForm" class="payment-loading-panel stack">
-        <h3>Set a new password</h3>
-        <p class="muted">You must change the default or temporary password before continuing.</p>
-        <input name="current_password" type="password" placeholder="Current password" autocomplete="current-password" required>
-        <input name="new_password" type="password" placeholder="New password (min 10 characters)" autocomplete="new-password" minlength="10" required>
-        <button class="primary">Update password</button>
-    </form>
-</div>
 <div id="paymentLoadingModal" class="hidden payment-loading-backdrop" aria-live="polite">
     <div class="payment-loading-panel">
         <div class="spinner"></div>
@@ -269,7 +292,7 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
     <div class="payment-loading-panel">
         <h3>Temporary password</h3>
         <p id="tempPasswordText"></p>
-        <p class="muted">Give this to the user once. They must change it at next login.</p>
+        <p class="muted">Give this password to the user securely.</p>
         <button id="tempPasswordCloseBtn" class="primary" type="button">Done</button>
     </div>
 </div>

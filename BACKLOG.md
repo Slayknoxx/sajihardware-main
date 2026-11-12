@@ -23,11 +23,11 @@ the bottom for reference.
 ## Completed in Phase 2
 
 - [x] **Admin password reset (any user)** — **Admin → Employee accounts → Reset
-      password** issues a one-time temporary password, sets
-      `must_change_password = 1`, bumps `session_version` so existing sessions
+      password** issues a temporary password, clears the forced-change flag,
+      bumps `session_version` so existing sessions
       are signed out, and writes a `PASSWORD_RESET` audit entry.
 - [x] **Break-glass admin recovery (CLI)** — `tools/reset_password.php --user=admin
-      [--password=...]` resets the hash, forces a password change, clears login
+      [--password=...]`       resets the hash and clears login
       lockouts, and writes an audit entry. No web server or session required.
       Covered by `tests/cli_reset_e2e.php`.
 - [x] **Automated HTTP test in CI** — `tests/run_http_smoke.ps1` starts the server
@@ -41,12 +41,13 @@ the bottom for reference.
       is set.
 - [x] **CSV import** — products, customers, and suppliers with templates,
       preview, skip/update duplicate handling, and transactional commits.
-- [x] **Test coverage** — `tests/phase2_smoke.php` (21 checks),
-      `tests/cli_reset_e2e.php` (9 checks), and the 39-check HTTP suite.
+- [x] **Test coverage** — `tests/phase2_smoke.php`,
+      `tests/cli_reset_e2e.php`, and the HTTP smoke suite.
 
 ## Completed in Phase 1 (reference)
 
-- Server-side forced password change (`403 PASSWORD_CHANGE_REQUIRED`).
+- Default admin credentials (`admin` / `admin123`) are reset once during the
+  authentication update; login no longer forces a password-change screen.
 - Clock-rollback guard (`license_clock_tampered`), with a capped anchor so a
   forward clock jump followed by a correction is not misread as a rollback.
 - Router denies path traversal and only exposes an explicit API whitelist,

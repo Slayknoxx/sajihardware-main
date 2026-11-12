@@ -10,10 +10,18 @@ function security_session_cookie_params(): void
     if (session_status() === PHP_SESSION_ACTIVE) {
         return;
     }
+    $timeoutMinutes = 30;
+    if (function_exists('settings_get')) {
+        try {
+            $timeoutMinutes = max(5, min(1440, (int)settings_get('session_timeout_minutes', '30')));
+        } catch (Throwable $e) {
+            app_log('Could not read session timeout setting: ' . $e->getMessage());
+        }
+    }
     $isHttps = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
         || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
     session_set_cookie_params([
-        'lifetime' => 1800,
+        'lifetime' => $timeoutMinutes * 60,
         'path' => '/',
         'secure' => $isHttps,
         'httponly' => true,
@@ -33,9 +41,57 @@ function security_send_headers(): void
     header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://api.qrserver.com; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'");
 }
 
+function security_normalize_ip(string $ip): ?string
+{
+    $value = trim($ip);
+    if ($value === '' || $value === 'unknown') {
+        return null;
+    }
+
+    $normalized = filter_var($value, FILTER_VALIDATE_IP);
+    if ($normalized !== false) {
+        return (string)$normalized;
+    }
+
+    if (preg_match('/^::ffff:(\d+\.\d+\.\d+\.\d+)$/', $value, $match) === 1) {
+        return (string)filter_var($match[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4);
+    }
+
+    return null;
+}
+
 function security_client_ip(): string
 {
-    return (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+    $remoteIp = security_normalize_ip((string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    if ($remoteIp === null) {
+        return 'unknown';
+    }
+
+    $trustedProxyIps = array_filter(array_map('trim', preg_split('/[\s,]+/', (string)env_value('APP_TRUSTED_PROXY_IPS', ''))), static fn (string $entry): bool => $entry !== '');
+    if ($trustedProxyIps === []) {
+        return $remoteIp;
+    }
+
+    $trusted = array_map(static fn (string $entry): ?string => security_normalize_ip($entry), $trustedProxyIps);
+    if (!in_array($remoteIp, array_filter($trusted), true)) {
+        return $remoteIp;
+    }
+
+    foreach (['HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CLIENT_IP'] as $header) {
+        $headerValue = (string)($_SERVER[$header] ?? '');
+        if ($headerValue === '') {
+            continue;
+        }
+        $candidates = array_map('trim', explode(',', $headerValue));
+        foreach (array_reverse($candidates) as $candidate) {
+            $normalized = security_normalize_ip($candidate);
+            if ($normalized !== null) {
+                return $normalized;
+            }
+        }
+    }
+
+    return $remoteIp;
 }
 
 function security_csrf_token(): string
