@@ -256,16 +256,6 @@ credential reset.
 - Indexes on `sales.created_at`, `sales(status, created_at)`, and
   `expenses.created_at` keep the period queries responsive.
 
-### Collapsible Sidebar
-
-- A **Menu** control sits directly below the full-size logo. It collapses the
-  sidebar to a 78 px icon rail and expands it again; the choice is remembered in
-  `localStorage` (`saji.sidebar.collapsed`).
-- On narrow/split windows (621–980 px) the sidebar automatically switches to the
-  icon rail, and users can still expand it temporarily. Below 620 px the
-  navigation falls back to the compact horizontal layout.
-- Section links below the Menu row read as submenus, with a guide line and
-  accessible expanded/collapsed state on the toggle.
 
 ### Phase 3 Test Suite
 
