@@ -18,6 +18,8 @@ This project is designed for:
 - Customer and supplier records
 - Quotations and held sales
 - Cash and sales reports
+- Business analytics and stock analytics
+- Collapsible sidebar that adapts to narrow windows
 - KCB STK push / M-Pesa integration
 - Local SQLite database
 
@@ -28,6 +30,7 @@ Files important to deployment:
 - [public/index.php](public/index.php) - frontend entry point
 - [config.php](config.php) - app settings
 - [lib.php](lib.php) - shared logic and DB setup
+- [lib/analytics.php](lib/analytics.php) - business analytics periods and reports
 - [.env](.env) - environment configuration
 - [data/saji_pos.sqlite3](data/saji_pos.sqlite3) - local SQLite database
 
@@ -288,7 +291,9 @@ Open the server in a browser:
 https://yourdomain.com/
 ```
 
-Then login with the admin account and make a test sale.
+Then login with the admin account and make a test sale. Open **Analytics** to
+confirm the period report loads, and try **Stock Analytics** to confirm inventory
+values and sell-through render.
 
 ---
 

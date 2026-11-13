@@ -18,6 +18,8 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
   `public/assets/saji-logo.png`).
 - Admin, Manager, and Employee login roles.
 - Admin user creation, employee records, branches, customers, suppliers, expenses, reports, sync queue, audit logs, and backups.
+- Business analytics with selectable periods, comparisons, revenue trends, top products and cashiers, payment mix, inventory, expenses, sales mix, customers, and eTIMS compliance.
+- Collapsible sidebar that remembers its state and switches to an icon rail on narrow or split windows.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
 - Atomic checkout transaction so stock and sale records are not partially saved.
 - KCB Buni STK Push payment folder with MySQL payment records, callback signature validation, and pending-payment states.
@@ -365,7 +367,7 @@ saji_hardware_pos_web/
     import.php            CSV templates, parsing, validation/preview, commit
     license.php            License states, clock guard, activation, check-in
     security.php           CSRF, security headers, origin checks, throttling
-  tests/                   Phase 1/2 regression suites and helpers
+  tests/                   Phase 1–3 regression suites and helpers
   tools/
     make_license.php       Issues signed offline license keys
     reset_password.php     Break-glass CLI password recovery
