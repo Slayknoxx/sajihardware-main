@@ -29,10 +29,18 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
 </main>
 
 <section id="app" class="app hidden">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
         <img id="brandLogo" src="<?= htmlspecialchars($company['logo'], ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars($company['name'], ENT_QUOTES, 'UTF-8') ?>" class="brand-logo">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Collapse menu" aria-expanded="true" title="Collapse menu">
+            <svg class="menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            <span class="menu-label">Menu</span>
+            <svg class="menu-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
         <nav id="nav"></nav>
-        <button id="logoutBtn" class="ghost">Sign out</button>
+        <button id="logoutBtn" class="ghost" aria-label="Sign out" title="Sign out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+            <span class="nav-label">Sign out</span>
+        </button>
     </aside>
     <section class="workspace">
         <div id="licenseBanner" class="license-banner hidden"></div>
@@ -140,7 +148,29 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         </section>
 
         <section id="analytics" class="view hidden">
-            <section class="panel"><h2>Business analytics</h2><div id="analyticsCards" class="kpis"></div></section>
+            <section class="panel analytics-head">
+                <div class="section-heading">
+                    <div>
+                        <h2>Business analytics</h2>
+                        <p id="analyticsPeriodLabel" class="muted">Month to date</p>
+                    </div>
+                    <button id="analyticsRefresh" class="secondary" type="button">Refresh</button>
+                </div>
+                <div id="analyticsPeriodTabs" class="period-tabs" role="group" aria-label="Analytics period">
+                    <button type="button" data-period="today">Today</button>
+                    <button type="button" data-period="7d">7 days</button>
+                    <button type="button" data-period="mtd" class="active">This month</button>
+                    <button type="button" data-period="last_month">Last month</button>
+                    <button type="button" data-period="qtd">This quarter</button>
+                    <button type="button" data-period="ytd">This year</button>
+                </div>
+                <div class="custom-range">
+                    <label>From<input id="analyticsStart" type="date"></label>
+                    <label>To<input id="analyticsEnd" type="date"></label>
+                    <button id="analyticsApplyRange" class="secondary" type="button">Apply range</button>
+                </div>
+            </section>
+            <div id="analyticsBody" class="analytics-body"></div>
         </section>
 
         <section id="cashflow" class="view hidden">
@@ -154,7 +184,14 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         </section>
 
         <section id="stockanalytics" class="view hidden">
-            <section class="panel"><h2>Stock analytics</h2><div id="stockAnalyticsPage" class="table-wrap"></div></section>
+            <section class="panel">
+                <div class="section-heading"><h2>Stock analytics</h2><span class="muted">Inventory value and supplier sell-through</span></div>
+                <div id="stockAnalyticsCards" class="analytics-kpis"></div>
+            </section>
+            <section class="panel" style="margin-top:16px">
+                <h2>Supplier sell-through</h2>
+                <div id="stockAnalyticsPage" class="table-wrap"></div>
+            </section>
         </section>
 
         <section id="admin" class="view hidden">

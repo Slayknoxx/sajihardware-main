@@ -20,6 +20,42 @@ the bottom for reference.
   - Wrap the portable build in an installer (Inno Setup or similar), sign it,
     and publish `SHA256SUMS.txt` alongside.
 
+## Analytics follow-ups
+
+- [ ] **G1 — Cost snapshot on `sale_items`**
+  - Gross profit currently uses each product's current `buying_price`, so past
+    periods change when prices are edited. Add `sale_items.cost_price` captured
+    at checkout and switch profit reporting to it. This is the only blocker for
+    accurate historical margin.
+
+- [ ] **G2 — Branch-level analytics**
+  - `sales` has no `branch_id`. Add it (populated from the logged-in user) before
+    any per-branch KPI or comparison.
+
+- [ ] **G3 — Credit sales / receivables**
+  - No credit checkout path exists, so debtor ageing and receivables analytics are
+    deferred until credit sales are a real workflow.
+
+- [ ] **G4 — Returns linked to products**
+  - `returns` has no product link and no API/UI, so return rate and net revenue by
+    product are unavailable.
+
+- [ ] **G5 — Purchase-order lines and receiving**
+  - `purchase_orders` has no line items or received quantity, blocking landed
+    cost, supplier price trends, and true margin.
+
+- [ ] **G6 — Cash shift reconciliation**
+  - `cash_shifts` is unused. Till short/over and cashier cash variance need
+    open/close screens.
+
+- [ ] **G7 — More payment methods**
+  - Only Cash and M-Pesa are accepted; card/bank/mobile-money splits need an
+    extended payment-method allow-list.
+
+- [ ] **G8 — Named customers**
+  - Walk-in sales dominate. Analytics labels walk-in figures as approximate;
+    reliable retention needs phone capture or named customers at checkout.
+
 ## Completed in Phase 2
 
 - [x] **Admin password reset (any user)** — **Admin → Employee accounts → Reset
@@ -43,6 +79,18 @@ the bottom for reference.
       preview, skip/update duplicate handling, and transactional commits.
 - [x] **Test coverage** — `tests/phase2_smoke.php`,
       `tests/cli_reset_e2e.php`, and the HTTP smoke suite.
+
+## Completed in Phase 3
+
+- [x] **Business analytics rebuild** — period reports (today/7d/MTD/last
+      month/QTD/YTD/custom) from confirmed sales only, with comparisons, trends,
+      payment mix, voids, VAT, products, cashiers, inventory, expenses, sales
+      mix, customers, and eTIMS compliance. Cost tiles gated by `cost.view`.
+- [x] **Stock analytics summary** — inventory value, low/out of stock, and
+      potential margin above the supplier sell-through table.
+- [x] **Collapsible sidebar** — Menu toggle, persisted preference, submenu
+      layout, and automatic icon rail on split/narrow windows.
+- [x] **Test coverage** — `tests/analytics_smoke.php` (50 checks).
 
 ## Completed in Phase 1 (reference)
 

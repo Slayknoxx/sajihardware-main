@@ -5,6 +5,7 @@ require_once __DIR__ . '/lib.php';
 require_once __DIR__ . '/lib/security.php';
 require_once __DIR__ . '/lib/license.php';
 require_once __DIR__ . '/lib/import.php';
+require_once __DIR__ . '/lib/analytics.php';
 
 $action = $_GET['action'] ?? '';
 $timeoutMinutes = 30;
@@ -243,6 +244,12 @@ try {
         ]);
     }
 
+    if ($action === 'analytics') {
+        require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        json_response(analytics_report($user, is_array($d) ? $d : []));
+    }
+
     if ($action === 'list') {
         $table = $_GET['table'] ?? '';
         $allowed = ['products','customers','suppliers','employees','branches','held_sales','returns','expenses','cash_transactions','quotations','purchase_orders','sync_queue','audit_logs','users','sales','sale_items'];
@@ -354,7 +361,14 @@ try {
     if ($action === 'stock_analytics') {
         require_role(['ADMIN','MANAGER']);
         $rows = db()->query('SELECT COALESCE(s.name, "Unassigned") supplier_name, p.name product, p.supplied_quantity total_units_supplied, p.quantity units_available_in_stock, COALESCE(SUM(CASE WHEN sa.status="COMPLETED" THEN si.quantity ELSE 0 END),0) units_sold, p.supplied_quantity - COALESCE(SUM(CASE WHEN sa.status="COMPLETED" THEN si.quantity ELSE 0 END),0) remaining_units FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id LEFT JOIN sale_items si ON si.product_id=p.id LEFT JOIN sales sa ON sa.id=si.sale_id GROUP BY p.id, supplier_name, p.name, p.supplied_quantity, p.quantity ORDER BY supplier_name, p.name')->fetchAll();
-        json_response(['rows' => $rows]);
+        $summary = db()->query('SELECT COUNT(*) products, COALESCE(SUM(CASE WHEN quantity <= reorder_level THEN 1 ELSE 0 END),0) low_stock, COALESCE(SUM(CASE WHEN quantity <= 0 THEN 1 ELSE 0 END),0) out_of_stock, COALESCE(SUM(quantity * buying_price),0) at_cost, COALESCE(SUM(quantity * selling_price),0) at_retail FROM products')->fetch() ?: [];
+        $canViewCost = role_has_permission((string)$user['role'], 'cost.view');
+        $atCost = (float)($summary['at_cost'] ?? 0);
+        $atRetail = (float)($summary['at_retail'] ?? 0);
+        $summary['at_cost'] = $canViewCost ? $atCost : null;
+        $summary['at_retail'] = $atRetail;
+        $summary['potential_margin'] = $canViewCost ? $atRetail - $atCost : null;
+        json_response(['rows' => $rows, 'summary' => $summary]);
     }
 
     if ($action === 'create_quotation') {

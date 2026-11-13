@@ -540,6 +540,11 @@ function money_json_format(mixed $value, ?string $key = null): mixed
         'total_sales' => true, 'total_expenses' => true, 'other_income' => true,
         'other_expenses' => true, 'net_cash' => true, 'income' => true,
         'expenses' => true, 'stock_value' => true,
+        'revenue' => true, 'gross_subtotal' => true, 'gross_profit' => true,
+        'avg_basket' => true, 'discounts' => true, 'vat' => true,
+        'cash_revenue' => true, 'mpesa_revenue' => true, 'pending_amount' => true,
+        'failed_amount' => true, 'void_value' => true, 'at_cost' => true,
+        'at_retail' => true, 'potential_margin' => true, 'profit' => true,
     ];
     if ($key !== null && isset($moneyFields[$key]) && is_numeric($value)) {
         return money_minor_to_major($value);
@@ -983,6 +988,9 @@ function init_db(): void
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_mpesa_request_id ON sales(mpesa_request_id)');
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_reference ON payments(payment_reference) WHERE payment_reference != ""');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_payments_checkout_request_id ON payments(checkout_request_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_status_created_at ON sales(status, created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at)');
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_reference ON payment_events(provider_reference) WHERE provider_reference != ""');
     $pdo->exec('UPDATE products SET supplied_quantity = quantity + COALESCE((SELECT SUM(quantity) FROM sale_items WHERE sale_items.product_id = products.id), 0) WHERE supplied_quantity = 0');
 

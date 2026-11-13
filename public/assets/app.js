@@ -53,6 +53,19 @@ const pages = [
   ['reports','Reports & Backups',['ADMIN','MANAGER']],
   ['settings','Settings',['ADMIN','MANAGER','EMPLOYEE']],
 ];
+const navIcons = {
+  dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/>',
+  sales: '<circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/><path d="M3 4h2l2.4 10.2a2 2 0 0 0 2 1.6h7.8a2 2 0 0 0 2-1.6L21 7H6"/>',
+  products: '<path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5z"/><path d="M3 8.5 12 14l9-5.5"/><path d="M12 14v7"/>',
+  people: '<circle cx="9" cy="8" r="3.2"/><path d="M2.8 20a6.2 6.2 0 0 1 12.4 0"/><circle cx="17.5" cy="9.5" r="2.4"/><path d="M15.5 15.6a5 5 0 0 1 5.7 4.4"/>',
+  quotations: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/>',
+  analytics: '<path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/>',
+  cashflow: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 12h.01M18 12h.01"/>',
+  stockanalytics: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 16 9 5 9-5"/>',
+  admin: '<path d="M12 3 4.5 6v5.5c0 4.4 3.2 7.6 7.5 9.5 4.3-1.9 7.5-5.1 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>',
+  reports: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 10h6M9 14h6M9 18h4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+};
 
 async function boot(){
   state.user = null;
@@ -163,8 +176,59 @@ function renderLicenseBanner(){
   banner.classList.remove('hidden');
 }
 function renderNav(){
-  qs('#nav').innerHTML = pages.filter(p=>p[2].includes(state.user.role)).map(p=>`<button data-page="${p[0]}">${p[1]}</button>`).join('');
+  qs('#nav').innerHTML = pages.filter(p=>p[2].includes(state.user.role)).map(p=>`<button data-page="${p[0]}" title="${p[1]}" aria-label="${p[1]}"><svg viewBox="0 0 24 24" aria-hidden="true">${navIcons[p[0]] || ''}</svg><span class="nav-label">${p[1]}</span></button>`).join('');
   qsa('#nav button').forEach(b=>b.onclick=()=>openPage(b.dataset.page).catch(err=>toast(err.message)));
+}
+const SIDEBAR_STORAGE_KEY = 'saji.sidebar.collapsed';
+const SIDEBAR_RAIL_MAX_WIDTH = 980;
+let sidebarPreference = false;
+let sidebarNarrowOverride = null;
+
+function sidebarMediaQuery(){
+  return window.matchMedia(`(max-width: ${SIDEBAR_RAIL_MAX_WIDTH}px)`);
+}
+function sidebarIsNarrow(){
+  return sidebarMediaQuery().matches;
+}
+function sidebarIsCollapsed(){
+  return qs('#app')?.classList.contains('sidebar-collapsed') || false;
+}
+function setSidebarCollapsed(collapsed){
+  const app = qs('#app');
+  if (!app) return;
+  app.classList.toggle('sidebar-collapsed', collapsed);
+  const toggle = qs('#sidebarToggle');
+  if (toggle) {
+    const label = collapsed ? 'Expand menu' : 'Collapse menu';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  }
+}
+function syncSidebar(){
+  // Narrow/split windows default to the icon rail, but a click can still widen it.
+  const collapsed = sidebarIsNarrow()
+    ? (sidebarNarrowOverride === null ? true : sidebarNarrowOverride)
+    : sidebarPreference;
+  setSidebarCollapsed(collapsed);
+}
+function initSidebar(){
+  try { sidebarPreference = localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1'; } catch (err) { }
+  const query = sidebarMediaQuery();
+  const onBreakpointChange = () => { sidebarNarrowOverride = null; syncSidebar(); };
+  if (query.addEventListener) query.addEventListener('change', onBreakpointChange);
+  else if (query.addListener) query.addListener(onBreakpointChange);
+  syncSidebar();
+  qs('#sidebarToggle')?.addEventListener('click', () => {
+    const collapsed = !sidebarIsCollapsed();
+    if (sidebarIsNarrow()) {
+      sidebarNarrowOverride = collapsed;
+    } else {
+      sidebarPreference = collapsed;
+      try { localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0'); } catch (err) { }
+    }
+    syncSidebar();
+  });
 }
 async function openPage(page){
   state.page=page; qsa('.view').forEach(v=>v.classList.add('hidden')); qs('#'+page).classList.remove('hidden');
@@ -442,17 +506,218 @@ async function loadCashFlow(){
   qs('#cashFlowDate').value=date;
 }
 async function loadStockAnalytics(){
-  const rows=(await api('stock_analytics', null, 'GET')).rows;
-  qs('#stockAnalyticsPage').innerHTML=renderStockAnalytics(rows);
+  const result = await api('stock_analytics', null, 'GET');
+  const s = result.summary || {};
+  qs('#stockAnalyticsCards').innerHTML = [
+    analyticsCard('Products tracked', Number(s.products || 0)),
+    analyticsCard('Low stock', Number(s.low_stock || 0), {sub: 'At or below reorder level'}),
+    analyticsCard('Out of stock', Number(s.out_of_stock || 0)),
+    s.at_cost === null || s.at_cost === undefined
+      ? analyticsCard('Inventory at cost', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+      : analyticsCard('Inventory at cost', money(s.at_cost), {sub: 'At current buying price'}),
+    analyticsCard('Inventory at retail', money(s.at_retail), {sub: 'At current selling price'}),
+    s.potential_margin === null || s.potential_margin === undefined
+      ? analyticsCard('Potential margin', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+      : analyticsCard('Potential margin', money(s.potential_margin), {sub: 'Retail minus cost'}),
+  ].join('');
+  qs('#stockAnalyticsPage').innerHTML = renderStockAnalytics(result.rows);
 }
 function renderStockAnalytics(rows){
   if(!rows.length) return '<p class="muted">No supplier-linked products yet.</p>';
   return `<table><thead><tr><th>Supplier name</th><th>Product</th><th>Total units supplied</th><th>Units available in stock</th><th>Units sold</th><th>Remaining units</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.supplier_name||'Unassigned')}</td><td>${esc(row.product||'')}</td><td>${esc(row.total_units_supplied||0)}</td><td>${esc(row.units_available_in_stock||0)}</td><td>${esc(row.units_sold||0)}</td><td>${esc(row.remaining_units||0)}</td></tr>`).join('')}</tbody></table>`;
 }
+const analyticsState = { period: 'mtd', start: '', end: '' };
+
+const analyticsDate = value => value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-KE', {day: '2-digit', month: 'short', year: 'numeric'}) : '';
+
+const compactMoney = value => {
+  const amount = Number(value) || 0;
+  if (!amount) return '';
+  if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1)}M`;
+  if (amount >= 1_000) return `${Math.round(amount / 1_000)}k`;
+  return String(Math.round(amount));
+};
+
+function analyticsDelta(pct, label = 'vs previous period'){
+  if (pct === null || pct === undefined) return '<span class="delta neutral" title="No comparison base">No comparison</span>';
+  const value = Number(pct);
+  const direction = value > 0 ? 'up' : value < 0 ? 'down' : 'flat';
+  const arrow = value > 0 ? '▲' : value < 0 ? '▼' : '■';
+  return `<span class="delta ${direction}" title="${esc(label)}">${arrow} ${Math.abs(value).toFixed(1)}%</span>`;
+}
+
+function analyticsCountDelta(diff, label = 'vs previous period'){
+  if (diff === null || diff === undefined) return '<span class="delta neutral">No comparison</span>';
+  const value = Number(diff);
+  const direction = value > 0 ? 'up' : value < 0 ? 'down' : 'flat';
+  return `<span class="delta ${direction}" title="${esc(label)}">${value > 0 ? '+' : ''}${value}</span>`;
+}
+
+function analyticsCard(label, value, {delta = '', sub = '', restricted = false} = {}){
+  return `<article class="analytics-card"><span class="label">${esc(label)}</span><strong${restricted ? ' class="restricted"' : ''}>${value}</strong>${delta ? `<div class="analytics-delta">${delta}</div>` : ''}${sub ? `<small>${sub}</small>` : ''}</article>`;
+}
+
+function renderAnalyticsChart(trend, {hourly = false} = {}){
+  const points = trend?.points || [];
+  if (!points.length || !points.some(point => Number(point.revenue) > 0)) {
+    return '<p class="muted analytics-empty">No sales in this period.</p>';
+  }
+  const max = Math.max(1, ...points.map(point => Number(point.revenue) || 0));
+  return `<div class="analytics-chart${hourly ? ' analytics-chart-hourly' : ''}" role="img" aria-label="${esc(trend.label || 'Revenue')} trend">${points.map((point, index) => {
+    const revenue = Number(point.revenue) || 0;
+    const height = Math.max(3, Math.round(revenue / max * 150));
+    const label = hourly ? (index % 3 === 0 ? point.label.slice(0, 2) : '') : point.label;
+    return `<div class="analytics-bar" title="${esc(point.label)}: ${money(revenue)} (${point.transactions} sale${Number(point.transactions) === 1 ? '' : 's'})"><b>${compactMoney(revenue)}</b><span style="height:${height}px"></span><small>${esc(label)}</small></div>`;
+  }).join('')}</div>`;
+}
+
+function renderRankedList(title, rows, metric){
+  if (!rows?.length) return `<div class="analytics-list-block"><h3>${esc(title)}</h3><p class="muted analytics-empty">No sales in this period.</p></div>`;
+  const item = row => `<li><span>${esc(row.name)}</span><b>${metric === 'units' ? `${Number(row.units)} units` : money(row.revenue)}</b></li>`;
+  const visible = rows.slice(0, 5).map(item).join('');
+  const extra = rows.slice(5, 10);
+  return `<div class="analytics-list-block"><h3>${esc(title)}</h3><ol class="analytics-list">${visible}</ol>${extra.length ? `<details class="analytics-more"><summary>Show top ${Math.min(10, rows.length)}</summary><ol class="analytics-list" start="6">${extra.map(item).join('')}</ol></details>` : ''}</div>`;
+}
+
+function renderMixTable(title, rows){
+  if (!rows?.length) return `<div class="analytics-list-block"><h3>${esc(title)}</h3><p class="muted analytics-empty">No product sales in this period.</p></div>`;
+  return `<div class="analytics-list-block"><h3>${esc(title)}</h3><div class="table-wrap"><table><thead><tr><th>Name</th><th>Units</th><th>Revenue</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.units)}</td><td>${money(row.revenue)}</td></tr>`).join('')}</tbody></table></div></div>`;
+}
+
+function renderTopCustomers(rows){
+  if (!rows?.length) return '<p class="muted analytics-empty">No named customers purchased in this period.</p>';
+  return `<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Sales</th><th>Revenue</th><th>Last purchase</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.transactions)}</td><td>${money(row.revenue)}</td><td>${row.last_purchase ? receiptDate(row.last_purchase) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderVatBreakdown(rows){
+  if (!rows?.length) return '';
+  return `<div class="table-wrap analytics-vat"><table><thead><tr><th>VAT rate</th><th>Invoices</th><th>VAT</th><th>Gross</th></tr></thead><tbody>${rows.map(row => `<tr><td>${(Number(row.rate) * 100).toFixed(1)}%</td><td>${Number(row.invoices)}</td><td>${money(row.vat)}</td><td>${money(row.gross)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderAnalytics(d){
+  const period = d.period;
+  const sales = d.sales;
+  const money_ = d.money;
+  const restricted = Boolean(d.restricted);
+  const previousLabel = `vs ${period.comparison_label}`;
+  const lastYearDelta = sales.change.revenue_last_year_pct === null
+    ? 'no comparison for last year'
+    : `${sales.change.revenue_last_year_pct >= 0 ? 'up' : 'down'} ${Math.abs(sales.change.revenue_last_year_pct).toFixed(1)}% vs same period last year`;
+
+  qs('#analyticsPeriodLabel').textContent = `${period.key === 'custom' ? period.label : `${period.label} · ${analyticsDate(period.start)} – ${analyticsDate(period.end)}`} · compared with ${period.comparison_label}`;
+  qsa('#analyticsPeriodTabs button').forEach(tab => tab.classList.toggle('active', tab.dataset.period === period.key));
+  qs('#analyticsStart').value = period.start;
+  qs('#analyticsEnd').value = period.end;
+
+  const sections = [];
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Sales</h2>
+    <div class="analytics-kpis">
+      ${analyticsCard('Revenue', money(sales.revenue), {delta: analyticsDelta(sales.change.revenue_pct, previousLabel), sub: lastYearDelta})}
+      ${analyticsCard('Transactions', Number(sales.transactions), {delta: analyticsCountDelta(sales.change.transactions, previousLabel), sub: `previous: ${Number(sales.previous.transactions)}`})}
+      ${analyticsCard('Average basket', money(sales.avg_basket), {delta: analyticsDelta(sales.change.avg_basket_pct, previousLabel)})}
+      ${restricted
+        ? analyticsCard('Gross profit', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+        : sales.gross_profit === null
+          ? analyticsCard('Gross profit', 'No cost data', {sub: 'Add buying prices to unlock profit'})
+          : analyticsCard('Gross profit', money(sales.gross_profit), {delta: analyticsDelta(sales.change.gross_profit_pct, previousLabel), sub: 'Estimated from current cost'})}
+      ${restricted
+        ? analyticsCard('Gross margin', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+        : analyticsCard('Gross margin', sales.gross_margin_pct === null ? '—' : `${Number(sales.gross_margin_pct).toFixed(1)}%`, {sub: 'Net of VAT'})}
+    </div>
+    <p class="muted analytics-note">${period.key === 'today'
+      ? (sales.last_sale_at ? `Last sale: ${receiptDate(sales.last_sale_at)}` : 'No sales yet today.')
+      : `Previous period revenue: ${money(sales.previous.revenue)} · same period last year: ${money(sales.last_year.revenue)}`}</p>
+    ${renderAnalyticsChart(d.trend)}
+    ${period.key === 'today' && d.hourly ? `<h3 class="analytics-subhead">Sales by hour</h3>${renderAnalyticsChart({label: 'Sales by hour', points: d.hourly}, {hourly: true})}` : ''}
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Money in</h2>
+    <div class="analytics-kpis">
+      ${analyticsCard('Cash', money(money_.cash.revenue), {sub: `${Number(money_.cash.count)} sale${Number(money_.cash.count) === 1 ? '' : 's'}`})}
+      ${analyticsCard('M-Pesa', money(money_.mpesa.revenue), {sub: `${Number(money_.mpesa.count)} sale${Number(money_.mpesa.count) === 1 ? '' : 's'}`})}
+      ${analyticsCard('Open M-Pesa', money(Number(money_.pending.amount) + Number(money_.failed.amount)), {sub: `${Number(money_.pending.count)} pending · ${Number(money_.failed.count)} failed`})}
+      ${analyticsCard('Discounts given', money(money_.discounts), {sub: money_.discount_pct === null ? 'No sales in period' : `${Number(money_.discount_pct).toFixed(1)}% of gross`})}
+      ${analyticsCard('Voids', money(money_.voids.void_value), {sub: `${Number(money_.voids.count)} voided sale${Number(money_.voids.count) === 1 ? '' : 's'}`})}
+      ${analyticsCard('VAT collected', money(money_.vat), {sub: 'Included in revenue'})}
+    </div>
+    ${money_.voids.by_cashier?.length ? `<p class="muted analytics-note">Voids by cashier: ${money_.voids.by_cashier.map(row => `${esc(row.name)} (${Number(row.count)})`).join(' · ')}</p>` : ''}
+    ${renderVatBreakdown(money_.vat_breakdown)}
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Top performers</h2>
+    <div class="analytics-lists">
+      ${renderRankedList('Top products by revenue', d.top_products.by_revenue, 'revenue')}
+      ${renderRankedList('Top products by units', d.top_products.by_units, 'units')}
+      ${renderRankedList('Top cashier', d.top_cashiers, 'revenue')}
+    </div>
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Inventory</h2>
+    <div class="analytics-kpis">
+      ${analyticsCard('Products tracked', Number(d.inventory.products))}
+      ${analyticsCard('Low stock', Number(d.inventory.low_stock), {sub: 'At or below reorder level'})}
+      ${analyticsCard('Out of stock', Number(d.inventory.out_of_stock))}
+      ${d.inventory.at_cost === null
+        ? analyticsCard('Inventory at cost', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+        : analyticsCard('Inventory at cost', money(d.inventory.at_cost), {sub: 'At current buying price'})}
+      ${analyticsCard('Inventory at retail', money(d.inventory.at_retail), {sub: 'At current selling price'})}
+      ${d.inventory.potential_margin === null
+        ? analyticsCard('Potential margin', 'Restricted', {restricted: true, sub: 'Requires cost.view'})
+        : analyticsCard('Potential margin', money(d.inventory.potential_margin), {sub: 'Retail minus cost'})}
+    </div>
+    <p class="muted analytics-note">Inventory values are a snapshot at current prices, not period movement.</p>
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Expenses</h2>
+    ${Number(d.expenses.count) > 0
+      ? `<div class="analytics-kpis">${analyticsCard('Total expenses', money(d.expenses.total), {sub: `${Number(d.expenses.count)} entr${Number(d.expenses.count) === 1 ? 'y' : 'ies'}`})}</div>
+         <div class="table-wrap"><table><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>${d.expenses.by_category.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.count)}</td><td>${money(row.total)}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted analytics-empty">No expenses recorded for this period.</p>'}
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Sales mix</h2>
+    <div class="analytics-lists">
+      ${renderMixTable('By category', d.categories)}
+      ${renderMixTable('By brand', d.brands)}
+    </div>
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Customers</h2>
+    <div class="analytics-kpis">
+      ${analyticsCard('New customers', Number(d.customers.new), {sub: 'First purchase in period'})}
+      ${analyticsCard('Returning customers', Number(d.customers.returning), {sub: 'Purchased before this period'})}
+      ${analyticsCard('Walk-in sales', Number(d.customers.walk_in_sales), {sub: 'Unnamed buyers · approximate'})}
+    </div>
+    ${renderTopCustomers(d.customers.top)}
+  </section>`);
+
+  const compliance = d.compliance;
+  sections.push(`<section class="panel compliance-section">
+    <h2>Compliance</h2>
+    <div class="compliance-strip">
+      <div><span>eTIMS unfiled</span><strong>${Number(compliance.pending)}</strong><small>${Number(compliance.pending) === 0 ? 'Nothing pending' : 'Completed sales awaiting filing'}</small></div>
+      <div><span>Filed</span><strong>${Number(compliance.filed)}</strong></div>
+      <div><span>Failed</span><strong>${Number(compliance.failed)}</strong></div>
+      <div><span>Exempt</span><strong>${Number(compliance.exempted)}</strong></div>
+      <div><span>Open backlog</span><strong>${Number(compliance.backlog.count)}</strong><small>${compliance.backlog.oldest_days === null ? 'No open backlog' : `Oldest ${Number(compliance.backlog.oldest_days)} day(s)`}</small></div>
+      <div><span>VAT collected</span><strong>${money(money_.vat)}</strong><small>Included in revenue</small></div>
+    </div>
+  </section>`);
+
+  qs('#analyticsBody').innerHTML = sections.join('');
+}
+
 async function loadAnalytics(){
-  const d=await api('dashboard', null, 'GET'), etims=await api('etims_summary', null, 'GET');
-  const pending=etims.rows.find(row=>row.etims_status==='PENDING')?.count||0;
-  qs('#analyticsCards').innerHTML=`<section class="kpi">Today<strong>${money(d.today.total)}</strong><span>${d.today.count} transactions</span></section><section class="kpi">This month<strong>${money(d.month_total)}</strong></section><section class="kpi">Stock value<strong>${state.permissions['cost.view'] ? money(d.stock_value) : 'Restricted'}</strong></section><section class="kpi">eTIMS pending<strong>${pending}</strong><span>Product-specific VAT</span></section>`;
+  const report = await api('analytics', {period: analyticsState.period, start: analyticsState.start, end: analyticsState.end});
+  renderAnalytics(report);
 }
 function renderQuoteCart(){
   const subtotal=state.cart.reduce((sum,item)=>sum+item.price*item.qty,0), discount=+qs('#quoteDiscount').value||0, total=Math.max(0,subtotal-discount);
@@ -863,4 +1128,22 @@ qs('#importType').onchange=()=>{importCsv='';qs('#importCommitBtn').disabled=tru
 qs('#importMode').onchange=()=>{importCsv='';qs('#importCommitBtn').disabled=true;qs('#importPreviewResult').innerHTML='';};
 qs('#backupBtn').onclick=async()=>toast('Backup created: '+(await api('backup')).file);
 qs('#retryBtn').onclick=async()=>{await api('retry_sync'); await loadReports(); toast('Sync queue updated')};
+qsa('#analyticsPeriodTabs button').forEach(button=>button.onclick=()=>{
+  analyticsState.period=button.dataset.period;
+  analyticsState.start='';
+  analyticsState.end='';
+  qsa('#analyticsPeriodTabs button').forEach(tab=>tab.classList.toggle('active', tab===button));
+  loadAnalytics().catch(error=>toast(error.message));
+});
+qs('#analyticsApplyRange').onclick=()=>{
+  const start=qs('#analyticsStart').value, end=qs('#analyticsEnd').value;
+  if(!start||!end){toast('Choose both a start and end date');return;}
+  analyticsState.period='custom';
+  analyticsState.start=start;
+  analyticsState.end=end;
+  qsa('#analyticsPeriodTabs button').forEach(tab=>tab.classList.remove('active'));
+  loadAnalytics().catch(error=>toast(error.message));
+};
+qs('#analyticsRefresh').onclick=()=>loadAnalytics().catch(error=>toast(error.message));
+initSidebar();
 boot().catch(e=>toast(e.message));

@@ -216,6 +216,65 @@ session invalidation. Phase 2 smoke checks also cover money conversion,
 permissions, integrity checks, structured logging, and the one-time admin
 credential reset.
 
+## Phase 3 — Completed
+
+### Business Analytics
+
+- The Analytics screen is a period report driven by a single `analytics` API
+  action (`lib/analytics.php`). Periods are **Today**, **7 days**, **This
+  month**, **Last month**, **This quarter**, **This year**, plus a custom date
+  range.
+- Every figure uses confirmed money only (`sales.status = 'COMPLETED'`).
+  Pending and failed M-Pesa payments, voids, and discounts are reported as
+  separate exposure metrics and never inflate revenue.
+- Each KPI shows a comparison (vs the previous period, same period last month,
+  or same period last year) or an explicit **No comparison** label when there is
+  no base to compare against.
+- Report sections: sales summary, revenue trend (daily or monthly buckets) and
+  hourly sales for today, money in (cash/M-Pesa/open payments/discounts/voids/
+  VAT breakdown), top products by revenue and units, top cashiers, inventory,
+  expenses by category, category and brand sales mix, customer counts with top
+  customers, and an eTIMS compliance strip.
+- Cost-derived figures — gross profit, gross margin, inventory at cost, and
+  potential margin — require the `cost.view` permission. Managers and employees
+  without it see **Restricted** tiles instead of numbers.
+- Gross profit is estimated from each product's current `buying_price` and is
+  labelled accordingly. Accurate historical profit needs the deferred
+  `sale_items.cost_price` snapshot (see `BACKLOG.md`, G1).
+- Inventory value is a snapshot at current prices, not period movement, and the
+  page says so.
+- Empty periods render explicit empty states rather than blank panels or zeros
+  without context.
+- Dates are grouped in the shop timezone (`Africa/Nairobi`), while timestamps
+  remain stored in UTC, so late-evening and early-morning sales land on the
+  correct local day.
+- **Stock analytics** now shows a summary strip (products, low/out of stock,
+  inventory at cost and retail, potential margin) above the supplier
+  sell-through table, with the same cost permission gating.
+- Indexes on `sales.created_at`, `sales(status, created_at)`, and
+  `expenses.created_at` keep the period queries responsive.
+
+### Collapsible Sidebar
+
+- A **Menu** control sits directly below the full-size logo. It collapses the
+  sidebar to a 78 px icon rail and expands it again; the choice is remembered in
+  `localStorage` (`saji.sidebar.collapsed`).
+- On narrow/split windows (621–980 px) the sidebar automatically switches to the
+  icon rail, and users can still expand it temporarily. Below 620 px the
+  navigation falls back to the compact horizontal layout.
+- Section links below the Menu row read as submenus, with a guide line and
+  accessible expanded/collapsed state on the toggle.
+
+### Phase 3 Test Suite
+
+```powershell
+php -c .\php-runtime.ini tests\analytics_smoke.php
+```
+
+Covers period maths (including quarter/last-month/custom ranges), shop-local day
+boundaries, confirmed-money filtering, comparison deltas, cost-permission gating,
+breakdowns, compliance counts, and empty-period behavior. 50 checks.
+
 ## Default Login
 
 ```text
@@ -302,6 +361,7 @@ saji_hardware_pos_web/
   lib.php                  SQLite connection, schema, auth helpers, backups
   router.php               Router for the built-in server with traversal guard
   lib/
+    analytics.php         Business analytics periods, KPIs, and reports
     import.php            CSV templates, parsing, validation/preview, commit
     license.php            License states, clock guard, activation, check-in
     security.php           CSRF, security headers, origin checks, throttling
