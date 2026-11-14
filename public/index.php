@@ -121,6 +121,31 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <div id="newSupplierFields" class="supplier-fields hidden"><input id="newSupplierName" placeholder="New supplier name"><input id="newSupplierPhone" placeholder="Supplier phone"><input id="newSupplierEmail" type="email" placeholder="Supplier email"><input id="newSupplierKraPin" placeholder="Supplier KRA PIN"></div>
                 <button class="primary">Add product</button>
             </form>
+            <section id="restockPanel" class="panel restock-panel hidden">
+                <div class="section-heading">
+                    <div>
+                        <h2>Restock</h2>
+                        <span class="muted">Add received units and record the movement</span>
+                    </div>
+                </div>
+                <form id="restockForm" class="form-grid restock-form">
+                    <select id="restockProduct" name="product_id" required><option value="">Select product</option></select>
+                    <input id="restockQuantity" name="quantity" type="number" min="1" max="100000" step="1" placeholder="Units received" required>
+                    <input id="restockReference" name="reference" maxlength="120" placeholder="Delivery note / invoice">
+                    <input id="restockBuyingPrice" name="buying_price" type="number" min="0" step="0.01" placeholder="New buying price (optional)">
+                    <button id="restockSubmit" class="primary" type="submit">Add stock</button>
+                </form>
+                <p id="restockSummary" class="muted"></p>
+            </section>
+            <section id="stockMovementsPanel" class="panel hidden" style="margin-top:16px">
+                <div class="section-heading">
+                    <div>
+                        <h2>Recent stock movements</h2>
+                        <span class="muted">Opening stock, sales, voids, and restocks</span>
+                    </div>
+                </div>
+                <div id="stockMovementsTable" class="table-wrap"></div>
+            </section>
             <div id="productsTable" class="panel table-wrap"></div>
         </section>
 

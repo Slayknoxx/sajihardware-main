@@ -447,6 +447,33 @@ async function loadProducts(){
   qs('#productsTable').innerHTML=table(rows);
   const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
   qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  const canRestock = ['ADMIN','MANAGER'].includes(state.user?.role);
+  qs('#restockPanel').classList.toggle('hidden', !canRestock);
+  qs('#stockMovementsPanel').classList.toggle('hidden', !canRestock);
+  if (canRestock) {
+    renderRestockProducts(rows);
+    await loadStockMovements();
+  }
+}
+function renderRestockProducts(rows){
+  const select = qs('#restockProduct');
+  if (!select) return;
+  select.innerHTML = '<option value="">Select product</option>' + rows.map(p=>`<option value="${esc(p.id)}">${esc(p.sku)} — ${esc(p.name)} (stock ${esc(p.quantity)})</option>`).join('');
+}
+function renderStockMovements(rows){
+  if (!rows?.length) return '<p class="muted">No stock movements yet.</p>';
+  return `<table><thead><tr><th>Date</th><th>Product</th><th>Change</th><th>Reason</th><th>Reference</th><th>By</th></tr></thead><tbody>${rows.map(row=>{
+    const delta = Number(row.quantity_delta) || 0;
+    return `<tr><td>${receiptDate(row.created_at)}</td><td>${esc(row.product_name)}<br><small class="muted">${esc(row.sku)}</small></td><td class="${delta < 0 ? 'stock-out' : 'stock-in'}">${delta > 0 ? '+' : ''}${delta}</td><td>${esc(row.reason)}</td><td>${esc(row.reference || '—')}</td><td>${esc(row.username)}</td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+async function loadStockMovements(){
+  try {
+    const result = await api('stock_movements&limit=25', null, 'GET');
+    qs('#stockMovementsTable').innerHTML = renderStockMovements(result.rows);
+  } catch (error) {
+    qs('#stockMovementsTable').innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
 }
 async function loadPeople(){
   const c=(await api('list&table=customers', null, 'GET')).rows, s=(await api('list&table=suppliers', null, 'GET')).rows;
@@ -1074,6 +1101,31 @@ qs('#holdSale').onclick=async()=>{await api('hold_sale',{cart:state.cart, custom
 qs('#proforma').onclick=()=>window.print();
 qs('#newSupplierBtn').onclick=()=>{qs('#newSupplierFields').classList.toggle('hidden'); if(!qs('#newSupplierFields').classList.contains('hidden')) qs('#newSupplierName').focus()};
 qs('#productForm').onsubmit=async e=>{e.preventDefault(); try{const data=formData(e.target); if(!qs('#newSupplierFields').classList.contains('hidden')){const supplier=await api('create_supplier',{name:qs('#newSupplierName').value,phone:qs('#newSupplierPhone').value,email:qs('#newSupplierEmail').value,kra_pin:qs('#newSupplierKraPin').value}); data.supplier_id=supplier.id;} await api('save_product', data); e.target.reset(); qs('#newSupplierFields').classList.add('hidden'); await loadProducts(); toast('Product added')}catch(err){toast(err.message)}};
+qs('#restockForm').onsubmit=async e=>{
+  e.preventDefault();
+  const button = qs('#restockSubmit');
+  const productId = Number(qs('#restockProduct').value);
+  const quantity = Number(qs('#restockQuantity').value);
+  if (!productId || !Number.isInteger(quantity) || quantity < 1) {
+    toast('Choose a product and enter units received');
+    return;
+  }
+  const payload = {product_id: productId, quantity, reference: qs('#restockReference').value.trim()};
+  const buyingPrice = qs('#restockBuyingPrice').value.trim();
+  if (buyingPrice !== '') payload.buying_price = buyingPrice;
+  button.disabled = true;
+  try {
+    const result = await api('restock_product', payload);
+    e.target.reset();
+    await loadProducts();
+    qs('#restockSummary').textContent = `${result.name} (${result.sku}): ${result.previous_quantity} → ${result.new_quantity} units`;
+    toast(`Stock updated: ${result.name}`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+};
 qs('#quoteDiscount').oninput=renderQuoteCart;
 qs('#createQuoteBtn').onclick=()=>createQuotation().catch(error=>toast(error.message));
 qs('#cashFlowPeriod').onchange=()=>loadCashFlow().catch(error=>toast(error.message));

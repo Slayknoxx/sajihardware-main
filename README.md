@@ -20,6 +20,7 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 - Admin user creation, employee records, branches, customers, suppliers, expenses, reports, sync queue, audit logs, and backups.
 - Business analytics with selectable periods, comparisons, revenue trends, top products and cashiers, payment mix, inventory, expenses, sales mix, customers, and eTIMS compliance.
 - Collapsible sidebar that remembers its state and switches to an icon rail on narrow or split windows.
+- Restocking from the Products page, with an optional buying-price update and a visible stock movement ledger.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
 - Atomic checkout transaction so stock and sale records are not partially saved.
 - KCB Buni STK Push payment folder with MySQL payment records, callback signature validation, and pending-payment states.
@@ -267,6 +268,43 @@ Covers period maths (including quarter/last-month/custom ranges), shop-local day
 boundaries, confirmed-money filtering, comparison deltas, cost-permission gating,
 breakdowns, compliance counts, and empty-period behavior. 50 checks.
 
+## Phase 4 — Completed
+
+### Restocking And Stock Movements
+
+- **Products → Restock** adds received units to an existing product. Select the
+  product, enter units received, and optionally record a delivery note/invoice
+  and a new buying price.
+- Restocking updates `products.quantity` and `products.supplied_quantity` inside
+  one transaction, so live stock and Stock Analytics sell-through stay aligned.
+- Every restock writes a `stock_movements` row with reason `RESTOCK`, the
+  reference, the acting user, and a timestamp, plus a `RESTOCK_PRODUCT` audit
+  entry.
+- **Recent stock movements** on the Products page shows opening stock, sales,
+  voids, and restocks, newest first. This is also the quickest way to verify a
+  restock was recorded.
+- Optional buying-price updates apply to the product cost used by inventory and
+  current profit reporting. Historical profit remains affected by the deferred
+  cost snapshot (G1).
+- Restocking and movement history are restricted to ADMIN and MANAGER; employees
+  do not see the panels and the API rejects their requests. The Products page
+  itself stays visible to employees for browsing.
+- Indexes on `stock_movements(product_id)` and `stock_movements(created_at)` keep
+  the ledger and integrity checks responsive.
+- Duplicate submissions are limited by disabling the submit button while saving;
+  there is no server-side idempotency key. Restocking does not create purchase
+  orders or supplier invoices; that remains the deferred G5 work.
+
+### Phase 4 Test Suite
+
+```powershell
+php -c .\php-runtime.ini tests\restock_smoke.php
+```
+
+Covers stock and supplied-quantity updates, movement and audit entries, optional
+buying-price changes, invalid input handling with no partial writes, movement
+history, role checks, and the analytics inventory link. 38 checks.
+
 ## Default Login
 
 ```text
@@ -357,7 +395,8 @@ saji_hardware_pos_web/
     import.php            CSV templates, parsing, validation/preview, commit
     license.php            License states, clock guard, activation, check-in
     security.php           CSRF, security headers, origin checks, throttling
-  tests/                   Phase 1–3 regression suites and helpers
+    stock.php              Restocking and stock movement history
+  tests/                   Phase 1–4 regression suites and helpers
   tools/
     make_license.php       Issues signed offline license keys
     reset_password.php     Break-glass CLI password recovery

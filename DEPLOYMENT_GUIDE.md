@@ -19,6 +19,7 @@ This project is designed for:
 - Quotations and held sales
 - Cash and sales reports
 - Business analytics and stock analytics
+- Restocking and stock movement history
 - Collapsible sidebar that adapts to narrow windows
 - KCB STK push / M-Pesa integration
 - Local SQLite database
@@ -31,6 +32,7 @@ Files important to deployment:
 - [config.php](config.php) - app settings
 - [lib.php](lib.php) - shared logic and DB setup
 - [lib/analytics.php](lib/analytics.php) - business analytics periods and reports
+- [lib/stock.php](lib/stock.php) - restocking and stock movement history
 - [.env](.env) - environment configuration
 - [data/saji_pos.sqlite3](data/saji_pos.sqlite3) - local SQLite database
 
@@ -293,7 +295,11 @@ https://yourdomain.com/
 
 Then login with the admin account and make a test sale. Open **Analytics** to
 confirm the period report loads, and try **Stock Analytics** to confirm inventory
-values and sell-through render.
+values and sell-through render. On **Products**, restock an item and confirm the
+new quantity and movement appear in the stock ledger.
+
+Existing databases pick up the new stock movement indexes automatically on the
+first request after upgrade; no manual migration is needed.
 
 ---
 

@@ -42,7 +42,9 @@ the bottom for reference.
 
 - [ ] **G5 — Purchase-order lines and receiving**
   - `purchase_orders` has no line items or received quantity, blocking landed
-    cost, supplier price trends, and true margin.
+    cost, supplier price trends, and true margin. Phase 4 restocking records
+    units received for an existing product, but it does not create or receive a
+    purchase order, so this remains open.
 
 - [ ] **G6 — Cash shift reconciliation**
   - `cash_shifts` is unused. Till short/over and cashier cash variance need
@@ -91,6 +93,17 @@ the bottom for reference.
 - [x] **Collapsible sidebar** — Menu toggle, persisted preference, submenu
       layout, and automatic icon rail on split/narrow windows.
 - [x] **Test coverage** — `tests/analytics_smoke.php` (50 checks).
+
+## Completed in Phase 4
+
+- [x] **Restock flow** — Products → Restock adds received units to an existing
+      product, updates live stock and supplied quantity, optionally refreshes the
+      buying price, and writes a `RESTOCK` stock movement plus an audit entry.
+- [x] **Stock movement ledger** — Recent stock movements shows opening stock,
+      sales, voids, and restocks, newest first, with reference and user.
+- [x] **Role enforcement** — Restocking and movement history are limited to
+      ADMIN and MANAGER; employees see no restock controls.
+- [x] **Test coverage** — `tests/restock_smoke.php` (38 checks).
 
 ## Completed in Phase 1 (reference)
 

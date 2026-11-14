@@ -991,6 +991,8 @@ function init_db(): void
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_status_created_at ON sales(status, created_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements(product_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_stock_movements_created_at ON stock_movements(created_at)');
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_reference ON payment_events(provider_reference) WHERE provider_reference != ""');
     $pdo->exec('UPDATE products SET supplied_quantity = quantity + COALESCE((SELECT SUM(quantity) FROM sale_items WHERE sale_items.product_id = products.id), 0) WHERE supplied_quantity = 0');
 

@@ -6,6 +6,7 @@ require_once __DIR__ . '/lib/security.php';
 require_once __DIR__ . '/lib/license.php';
 require_once __DIR__ . '/lib/import.php';
 require_once __DIR__ . '/lib/analytics.php';
+require_once __DIR__ . '/lib/stock.php';
 
 $action = $_GET['action'] ?? '';
 $timeoutMinutes = 30;
@@ -557,6 +558,18 @@ try {
         }
         audit($user['username'], 'CREATE_PRODUCT', $d['sku']);
         json_response(['ok' => true]);
+    }
+
+    if ($action === 'restock_product') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        json_response(stock_restock($user, $d));
+    }
+
+    if ($action === 'stock_movements') {
+        require_role(['ADMIN','MANAGER']);
+        $limit = max(1, min(100, (int)($_GET['limit'] ?? 25)));
+        json_response(['rows' => stock_recent_movements($limit)]);
     }
 
     if ($action === 'create_supplier') {
