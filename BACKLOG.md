@@ -105,6 +105,20 @@ the bottom for reference.
       ADMIN and MANAGER; employees see no restock controls.
 - [x] **Test coverage** — `tests/restock_smoke.php` (38 checks).
 
+## Completed in Phase 5
+
+- [x] **Employee workspace** — Employees land on Sales and see only Sales,
+      Products (catalogue), Quotations, and Settings. Dashboard and Customers &
+      Suppliers are limited to ADMIN and MANAGER.
+- [x] **Catalogue-only Products page** — The Add product form is hidden for
+      employees; the product list remains visible, and restock/stock movement
+      panels stay hidden.
+- [x] **Server-published pages** — `role_pages()` supplies the allowed page ids at
+      login and session refresh, and the browser re-checks page access.
+- [x] **API enforcement** — Employees cannot add products, create suppliers, or
+      list customers/suppliers.
+- [x] **Test coverage** — `tests/phase5_smoke.php` (19 checks).
+
 ## Completed in Phase 1 (reference)
 
 - Default admin credentials (`admin` / `admin123`) are reset once during the

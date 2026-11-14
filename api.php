@@ -78,6 +78,7 @@ try {
             'company' => company_profile(),
             'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
             'permissions' => role_permissions_config()[$user['role']] ?? [],
+            'pages' => role_pages((string)$user['role']),
             'version' => APP_VERSION,
         ]);
     }
@@ -102,6 +103,7 @@ try {
             'version' => APP_VERSION,
             'setup_completed' => (string)(settings_get('setup_completed', '0') ?? '0') === '1',
             'permissions' => $me ? (role_permissions_config()[$me['role']] ?? []) : [],
+            'pages' => $me ? role_pages((string)$me['role']) : [],
         ]);
     }
 
@@ -268,6 +270,9 @@ try {
                 }
                 unset($row);
             }
+        } elseif (in_array($table, ['customers', 'suppliers'], true)) {
+            require_role(['ADMIN', 'MANAGER']);
+            $rows = db()->query("SELECT * FROM {$table} ORDER BY id DESC LIMIT 300")->fetchAll();
         } elseif ($table === 'quotations') {
             $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
         } else {
@@ -540,7 +545,7 @@ try {
     }
 
     if ($action === 'save_product') {
-        require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        require_role(['ADMIN','MANAGER']);
         $d = input_json();
         $quantity = filter_var($d['quantity'] ?? null, FILTER_VALIDATE_INT);
         $buyingPrice = money_to_minor($d['buying_price'] ?? null);
@@ -573,7 +578,7 @@ try {
     }
 
     if ($action === 'create_supplier') {
-        require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        require_role(['ADMIN','MANAGER']);
         $d = input_json();
         $name = trim((string)($d['name'] ?? ''));
         if ($name === '') {
@@ -590,7 +595,7 @@ try {
         $table = $_GET['table'] ?? '';
         $d = input_json();
         $defs = [
-            'customers' => ['ADMIN','MANAGER','EMPLOYEE', ['name','phone','email','kra_pin']],
+            'customers' => ['ADMIN','MANAGER', ['name','phone','email','kra_pin']],
             'suppliers' => ['ADMIN','MANAGER', ['name','phone','email','kra_pin']],
             'employees' => ['ADMIN', ['name','phone','role','salary']],
             'branches' => ['ADMIN','MANAGER', ['name','location','phone']],

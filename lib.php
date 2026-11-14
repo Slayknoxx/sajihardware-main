@@ -311,6 +311,30 @@ function role_permissions_config(): array
     return $defaults;
 }
 
+/**
+ * Navigation pages each role may open. The employee workspace is deliberately
+ * narrow: sales, the product catalogue, quotations, and personal settings.
+ * Dashboard and Customers & Suppliers stay with ADMIN and MANAGER.
+ */
+function role_pages_config(): array
+{
+    return [
+        'ADMIN' => ['dashboard', 'sales', 'products', 'people', 'quotations', 'analytics', 'cashflow', 'stockanalytics', 'admin', 'reports', 'settings'],
+        'MANAGER' => ['dashboard', 'sales', 'products', 'people', 'quotations', 'analytics', 'cashflow', 'stockanalytics', 'reports', 'settings'],
+        'EMPLOYEE' => ['sales', 'products', 'quotations', 'settings'],
+    ];
+}
+
+/**
+ * Page ids a role may open, in the app's navigation order.
+ *
+ * @return array<int, string>
+ */
+function role_pages(string $role): array
+{
+    return role_pages_config()[$role] ?? [];
+}
+
 function role_has_permission(string $role, string $permission): bool
 {
     $permissions = role_permissions_config();

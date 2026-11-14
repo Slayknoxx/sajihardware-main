@@ -20,6 +20,7 @@ This project is designed for:
 - Cash and sales reports
 - Business analytics and stock analytics
 - Restocking and stock movement history
+- Role-based workspace: employees see sales, the product catalogue, quotations, and settings only
 - Collapsible sidebar that adapts to narrow windows
 - KCB STK push / M-Pesa integration
 - Local SQLite database
@@ -299,7 +300,9 @@ values and sell-through render. On **Products**, restock an item and confirm the
 new quantity and movement appear in the stock ledger.
 
 Existing databases pick up the new stock movement indexes automatically on the
-first request after upgrade; no manual migration is needed.
+first request after upgrade; no manual migration is needed. Log in with an
+employee account and confirm **Dashboard** and **Customers & Suppliers** are
+absent and the Products page has no Add product form.
 
 ---
 

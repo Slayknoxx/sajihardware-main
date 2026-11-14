@@ -21,6 +21,7 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 - Business analytics with selectable periods, comparisons, revenue trends, top products and cashiers, payment mix, inventory, expenses, sales mix, customers, and eTIMS compliance.
 - Collapsible sidebar that remembers its state and switches to an icon rail on narrow or split windows.
 - Restocking from the Products page, with an optional buying-price update and a visible stock movement ledger.
+- Employee accounts are limited to Sales, the product catalogue, Quotations, and Settings — no Dashboard, Customers & Suppliers, or product-entry form.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
 - Atomic checkout transaction so stock and sale records are not partially saved.
 - KCB Buni STK Push payment folder with MySQL payment records, callback signature validation, and pending-payment states.
@@ -305,6 +306,33 @@ Covers stock and supplied-quantity updates, movement and audit entries, optional
 buying-price changes, invalid input handling with no partial writes, movement
 history, role checks, and the analytics inventory link. 38 checks.
 
+## Phase 5 — Completed
+
+### Employee Workspace
+
+- Employee accounts now open on **Sales** and only see **Sales**, **Products**,
+  **Quotations**, and **Settings** in the sidebar. **Dashboard** and
+  **Customers & Suppliers** are ADMIN/MANAGER pages.
+- The Products page is catalogue-only for employees: the **Add product** form is
+  hidden, while the product list stays visible. Restock and stock movement panels
+  remain hidden as before.
+- The allowed page list is issued by the server (`role_pages()` in `lib.php`) at
+  login and on session refresh. The browser also re-checks it, so a stale or
+  manually opened page falls back to the role's first allowed page.
+- The API enforces the same boundary: employees cannot add products, create
+  suppliers, or list customers/suppliers. Those requests are rejected with 403.
+- Managers and admins keep their existing workspace.
+
+### Phase 5 Test Suite
+
+```powershell
+php -c .\php-runtime.ini tests\phase5_smoke.php
+```
+
+Covers employee page restrictions, manager/admin access, unknown roles, and the
+API role gates for product creation, supplier creation, and customer/supplier
+lists. 19 checks.
+
 ## Default Login
 
 ```text
@@ -396,7 +424,7 @@ saji_hardware_pos_web/
     license.php            License states, clock guard, activation, check-in
     security.php           CSRF, security headers, origin checks, throttling
     stock.php              Restocking and stock movement history
-  tests/                   Phase 1–4 regression suites and helpers
+  tests/                   Phase 1–5 regression suites and helpers
   tools/
     make_license.php       Issues signed offline license keys
     reset_password.php     Break-glass CLI password recovery

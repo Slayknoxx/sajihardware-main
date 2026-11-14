@@ -2,7 +2,7 @@ let csrfToken = '';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok){const error=new Error(j.error||'Request failed'); error.code=j.code; error.license=j.license; throw error;} return j});
 const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
-const state = {user:null, permissions:{}, products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1};
+const state = {user:null, permissions:{}, pages:[], products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1};
 const money = n => `KES ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const showPaymentLoading = (label='Waiting for M-Pesa confirmation...') => {
   const modal = document.getElementById('paymentLoadingModal');
@@ -41,10 +41,10 @@ const enforceMpesaInput = () => {
 let healthTimer = null;
 
 const pages = [
-  ['dashboard','Dashboard',['ADMIN','MANAGER','EMPLOYEE']],
+  ['dashboard','Dashboard',['ADMIN','MANAGER']],
   ['sales','Sales',['ADMIN','MANAGER','EMPLOYEE']],
   ['products','Products',['ADMIN','MANAGER','EMPLOYEE']],
-  ['people','Customers & Suppliers',['ADMIN','MANAGER','EMPLOYEE']],
+  ['people','Customers & Suppliers',['ADMIN','MANAGER']],
   ['quotations','Quotations',['ADMIN','MANAGER','EMPLOYEE']],
   ['analytics','Analytics',['ADMIN','MANAGER']],
   ['cashflow','Cash Flow',['ADMIN','MANAGER']],
@@ -70,6 +70,7 @@ const navIcons = {
 async function boot(){
   state.user = null;
   state.permissions = {};
+  state.pages = [];
   qs('#app').classList.add('hidden');
   qs('#login').classList.remove('hidden');
   startConnectionMonitor();
@@ -81,6 +82,7 @@ async function boot(){
     state.company = me.company || state.company;
     state.setupCompleted = me.setup_completed !== false;
     state.permissions = me.permissions || {};
+    state.pages = me.pages || [];
     if (me.user && me.user.id) {
       state.user = me.user;
       showApp();
@@ -121,11 +123,18 @@ function startConnectionMonitor(){
   window.addEventListener('offline', () => setConnectionStatus(false, 'Offline'));
   if (!healthTimer) healthTimer = setInterval(checkConnection, 15000);
 }
+function applyRoleVisibility(){
+  const canManageProducts = ['ADMIN','MANAGER'].includes(state.user?.role);
+  qs('#productForm')?.classList.toggle('hidden', !canManageProducts);
+  qs('#restockPanel')?.classList.toggle('hidden', !canManageProducts);
+  qs('#stockMovementsPanel')?.classList.toggle('hidden', !canManageProducts);
+}
 function showApp(){
   qs('#login').classList.add('hidden'); qs('#app').classList.remove('hidden');
   qs('#userPill').textContent = `${state.user.full_name || state.user.username} · ${state.user.role}`;
   applyBranding();
-  renderNav(); renderLicenseBanner(); openPage('dashboard').catch(err=>toast(err.message));
+  applyRoleVisibility();
+  renderNav(); renderLicenseBanner(); openPage(defaultPage()).catch(err=>toast(err.message));
 }
 function applyBranding(){
   const c = state.company;
@@ -175,8 +184,17 @@ function renderLicenseBanner(){
   banner.classList.toggle('danger', danger);
   banner.classList.remove('hidden');
 }
+function allowedPages(){
+  if (state.pages?.length) return state.pages;
+  return pages.filter(p=>p[2].includes(state.user?.role)).map(p=>p[0]);
+}
+function defaultPage(){
+  const allowed = allowedPages();
+  return pages.find(p=>allowed.includes(p[0]))?.[0] || 'sales';
+}
 function renderNav(){
-  qs('#nav').innerHTML = pages.filter(p=>p[2].includes(state.user.role)).map(p=>`<button data-page="${p[0]}" title="${p[1]}" aria-label="${p[1]}"><svg viewBox="0 0 24 24" aria-hidden="true">${navIcons[p[0]] || ''}</svg><span class="nav-label">${p[1]}</span></button>`).join('');
+  const allowed = allowedPages();
+  qs('#nav').innerHTML = pages.filter(p=>allowed.includes(p[0])).map(p=>`<button data-page="${p[0]}" title="${p[1]}" aria-label="${p[1]}"><svg viewBox="0 0 24 24" aria-hidden="true">${navIcons[p[0]] || ''}</svg><span class="nav-label">${p[1]}</span></button>`).join('');
   qsa('#nav button').forEach(b=>b.onclick=()=>openPage(b.dataset.page).catch(err=>toast(err.message)));
 }
 const SIDEBAR_STORAGE_KEY = 'saji.sidebar.collapsed';
@@ -231,6 +249,7 @@ function initSidebar(){
   });
 }
 async function openPage(page){
+  if(!allowedPages().includes(page)) page = defaultPage();
   state.page=page; qsa('.view').forEach(v=>v.classList.add('hidden')); qs('#'+page).classList.remove('hidden');
   qsa('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.page===page));
   qs('#pageTitle').textContent = pages.find(p=>p[0]===page)?.[1] || 'POS';
@@ -445,12 +464,13 @@ async function printReceipt(id){
 async function loadProducts(){
   const rows=(await api('list&table=products', null, 'GET')).rows;
   qs('#productsTable').innerHTML=table(rows);
-  const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
-  qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
-  const canRestock = ['ADMIN','MANAGER'].includes(state.user?.role);
-  qs('#restockPanel').classList.toggle('hidden', !canRestock);
-  qs('#stockMovementsPanel').classList.toggle('hidden', !canRestock);
-  if (canRestock) {
+  const canManageProducts = ['ADMIN','MANAGER'].includes(state.user?.role);
+  qs('#productForm').classList.toggle('hidden', !canManageProducts);
+  qs('#restockPanel').classList.toggle('hidden', !canManageProducts);
+  qs('#stockMovementsPanel').classList.toggle('hidden', !canManageProducts);
+  if (canManageProducts) {
+    const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
+    qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
     renderRestockProducts(rows);
     await loadStockMovements();
   }
@@ -1056,6 +1076,7 @@ qs('#loginForm').onsubmit=async e=>{
     csrfToken = result.csrf || csrfToken;
     state.user = result.user;
     state.permissions = result.permissions || {};
+    state.pages = result.pages || [];
     state.license = result.license || state.license;
     state.company = result.company || state.company;
     state.setupCompleted = result.setup_completed !== false;
