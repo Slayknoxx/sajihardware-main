@@ -320,7 +320,7 @@ function role_pages_config(): array
 {
     return [
         'ADMIN' => ['dashboard', 'sales', 'products', 'people', 'quotations', 'analytics', 'cashflow', 'stockanalytics', 'admin', 'reports', 'settings'],
-        'MANAGER' => ['dashboard', 'sales', 'products', 'people', 'quotations', 'analytics', 'cashflow', 'stockanalytics', 'reports', 'settings'],
+        'MANAGER' => ['dashboard', 'sales', 'products', 'people', 'quotations', 'analytics', 'cashflow', 'stockanalytics', 'admin', 'reports', 'settings'],
         'EMPLOYEE' => ['sales', 'products', 'quotations', 'settings'],
     ];
 }
@@ -849,6 +849,7 @@ function init_db(): void
             quote_no TEXT NOT NULL UNIQUE,
             customer_id INTEGER,
             customer_name TEXT NOT NULL DEFAULT 'Walk-in Customer',
+            customer_kra_pin TEXT NOT NULL DEFAULT '',
             subtotal INTEGER NOT NULL DEFAULT 0,
             tax INTEGER NOT NULL DEFAULT 0,
             discount INTEGER NOT NULL DEFAULT 0,
@@ -1006,6 +1007,7 @@ function init_db(): void
     ]);
     ensure_table_columns('quotations', [
         'converted_sale_id' => 'INTEGER',
+        'customer_kra_pin' => 'TEXT NOT NULL DEFAULT ""',
     ]);
 
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_payment_reference ON sales(payment_reference) WHERE payment_reference != ""');

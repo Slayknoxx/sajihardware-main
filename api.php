@@ -7,6 +7,12 @@ require_once __DIR__ . '/lib/license.php';
 require_once __DIR__ . '/lib/import.php';
 require_once __DIR__ . '/lib/analytics.php';
 require_once __DIR__ . '/lib/stock.php';
+require_once __DIR__ . '/lib/products.php';
+require_once __DIR__ . '/lib/people.php';
+require_once __DIR__ . '/lib/quotations.php';
+require_once __DIR__ . '/lib/cashflow.php';
+require_once __DIR__ . '/lib/staff.php';
+require_once __DIR__ . '/lib/exports.php';
 
 $action = $_GET['action'] ?? '';
 $timeoutMinutes = 30;
@@ -273,18 +279,41 @@ try {
         } elseif (in_array($table, ['customers', 'suppliers'], true)) {
             require_role(['ADMIN', 'MANAGER']);
             $rows = db()->query("SELECT * FROM {$table} ORDER BY id DESC LIMIT 300")->fetchAll();
+        } elseif (in_array($table, ['sales', 'sale_items'], true)) {
+            require_role(['ADMIN', 'MANAGER']);
+            $query = $table === 'sales'
+                ? "SELECT * FROM sales WHERE status='COMPLETED' ORDER BY id DESC LIMIT 300"
+                : 'SELECT * FROM sale_items ORDER BY id DESC LIMIT 300';
+            $rows = db()->query($query)->fetchAll();
         } elseif ($table === 'quotations') {
-            $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
+            $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.customer_kra_pin, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
         } else {
             if ($table === 'audit_logs') {
                 require_role(['ADMIN']);
             }
-            $query = $table === 'sales'
-                ? "SELECT * FROM sales WHERE status='COMPLETED' ORDER BY id DESC LIMIT 300"
-                : "SELECT * FROM {$table} ORDER BY id DESC LIMIT 300";
-            $rows = db()->query($query)->fetchAll();
+            $rows = db()->query("SELECT * FROM {$table} ORDER BY id DESC LIMIT 300")->fetchAll();
         }
         json_response(['rows' => $rows]);
+    }
+
+    if ($action === 'update_person') {
+        $user = require_role(['ADMIN','MANAGER']);
+        json_response(person_update($user, input_json()));
+    }
+
+    if ($action === 'update_cash_entry') {
+        $user = require_role(['ADMIN']);
+        json_response(cash_entry_update($user, input_json()));
+    }
+
+    if ($action === 'update_staff') {
+        $user = require_role(['ADMIN','MANAGER']);
+        json_response(staff_update($user, input_json()));
+    }
+
+    if ($action === 'delete_staff') {
+        $user = require_role(['ADMIN']);
+        json_response(staff_delete($user, input_json()));
     }
 
     if ($action === 'delete_person') {
@@ -313,30 +342,18 @@ try {
 
     if ($action === 'cash_flow') {
         require_role(['ADMIN','MANAGER']);
-        $d = input_json();
-        $period = in_array($d['period'] ?? 'month', ['day','month','year'], true) ? $d['period'] : 'month';
-        $anchor = trim((string)($d['date'] ?? date('Y-m-d')));
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $anchor)) $anchor = date('Y-m-d');
-        $formats = ['day' => ["date(?)", "date(?)", "strftime('%H:00', created_at)"], 'month' => ["strftime('%Y-%m', ?)", "strftime('%Y-%m', ?)", "strftime('%d', created_at)"], 'year' => ["strftime('%Y', ?)", "strftime('%Y', ?)", "strftime('%m', created_at)"]];
-        [$startExpr, $endExpr, $bucketFormat] = $formats[$period];
-        $start = $period === 'day' ? $anchor : ($period === 'month' ? substr($anchor, 0, 7) : substr($anchor, 0, 4));
-        $salesWhere = "status='COMPLETED' AND {$startExpr} = {$endExpr}";
-        $salesStmt = db()->prepare("SELECT COALESCE(SUM(CASE WHEN payment_method='Cash' THEN total ELSE 0 END),0) cash_sales, COALESCE(SUM(total),0) total_sales FROM sales WHERE {$salesWhere}");
-        $salesStmt->execute([$anchor, $anchor]);
-        $summary = $salesStmt->fetch();
-        $expenseStmt = db()->prepare("SELECT COALESCE(SUM(amount),0) total_expenses FROM expenses WHERE {$startExpr} = {$endExpr}");
-        $expenseStmt->execute([$anchor, $anchor]);
-        $expenses = $expenseStmt->fetch();
-        $movementStmt = db()->prepare("SELECT COALESCE(SUM(CASE WHEN type='INCOME' THEN amount ELSE 0 END),0) other_income, COALESCE(SUM(CASE WHEN type='EXPENSE' THEN amount ELSE 0 END),0) other_expenses FROM cash_transactions WHERE {$startExpr} = {$endExpr}");
-        $movementStmt->execute([$anchor, $anchor]);
-        $movements = $movementStmt->fetch();
-        $seriesStmt = db()->prepare("SELECT bucket, COALESCE(SUM(income),0) income, COALESCE(SUM(expenses),0) expenses FROM (SELECT {$bucketFormat} bucket, CASE WHEN payment_method='Cash' THEN total ELSE 0 END income, 0 expenses FROM sales WHERE {$salesWhere} UNION ALL SELECT {$bucketFormat} bucket, 0 income, amount expenses FROM expenses WHERE {$startExpr} = {$endExpr} UNION ALL SELECT {$bucketFormat} bucket, CASE WHEN type='INCOME' THEN amount ELSE 0 END income, CASE WHEN type='EXPENSE' THEN amount ELSE 0 END expenses FROM cash_transactions WHERE {$startExpr} = {$endExpr}) GROUP BY bucket ORDER BY bucket");
-        $seriesParams = array_merge([$anchor, $anchor], [$anchor, $anchor], [$anchor, $anchor]);
-        $seriesStmt->execute($seriesParams);
-        $series = $seriesStmt->fetchAll();
-        $totalExpenses = (float)$expenses['total_expenses'] + (float)$movements['other_expenses'];
-        $totalIncome = (float)$summary['cash_sales'] + (float)$movements['other_income'];
-        json_response(['period' => $period, 'date' => $anchor, 'summary' => ['cash_sales' => $summary['cash_sales'], 'total_sales' => $summary['total_sales'], 'expenses' => $totalExpenses, 'other_income' => $movements['other_income'], 'other_expenses' => $movements['other_expenses'], 'net_cash' => $totalIncome - $totalExpenses], 'series' => $series]);
+        json_response(cash_flow_report(input_json()));
+    }
+
+    if ($action === 'export_csv') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $export = csv_export_file($user, (string)($_GET['type'] ?? ''), $_GET);
+        audit($user['username'], 'EXPORT_CSV', $export['type']);
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $export['filename'] . '"');
+        header('X-Content-Type-Options: nosniff');
+        echo $export['csv'];
+        exit;
     }
 
     if ($action === 'reset_business_data') {
@@ -415,10 +432,14 @@ try {
             $tax += (int)round(($lineTotal - $lineDiscount) * $rate / (1 + $rate), 0, PHP_ROUND_HALF_UP);
         }
         $total = $subtotal - $discount;
+        $customerKraPin = trim((string)($d['customer_kra_pin'] ?? ''));
+        if (mb_strlen($customerKraPin) > 40) {
+            json_response(['error' => 'KRA PIN must be 40 characters or fewer'], 400);
+        }
         $quoteNo = 'QT-' . date('Ymd-His') . '-' . random_int(100, 999);
         db_begin_immediate();
-        $pdo->prepare('INSERT INTO quotations(quote_no, customer_id, customer_name, subtotal, tax, discount, total, valid_until, created_by) VALUES(?,?,?,?,?,?,?,?,?)')
-            ->execute([$quoteNo, !empty($d['customer_id']) ? (int)$d['customer_id'] : null, $d['customer_name'] ?? 'Walk-in Customer', $subtotal, $tax, $discount, $total, $d['valid_until'] ?? null, $user['id']]);
+        $pdo->prepare('INSERT INTO quotations(quote_no, customer_id, customer_name, customer_kra_pin, subtotal, tax, discount, total, valid_until, created_by) VALUES(?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$quoteNo, !empty($d['customer_id']) ? (int)$d['customer_id'] : null, $d['customer_name'] ?? 'Walk-in Customer', $customerKraPin, $subtotal, $tax, $discount, $total, $d['valid_until'] ?? null, $user['id']]);
         $quoteId = (int)$pdo->lastInsertId();
         foreach ($items as [$product, $quantity, $lineTotal]) {
             $pdo->prepare('INSERT INTO quotation_items(quotation_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
@@ -427,6 +448,11 @@ try {
         db_commit();
         audit($user['username'], 'CREATE_QUOTATION', $quoteNo);
         json_response(['ok' => true, 'id' => $quoteId, 'quote_no' => $quoteNo]);
+    }
+
+    if ($action === 'update_quotation') {
+        $user = require_role(['ADMIN','MANAGER']);
+        json_response(quotation_update($user, input_json()));
     }
 
     if ($action === 'quotation_detail') {
@@ -442,19 +468,11 @@ try {
     }
 
     if ($action === 'delete_quotation') {
-        require_permission('records.delete');
+        $user = require_permission('records.delete');
         $id = (int)(input_json()['id'] ?? 0);
-        $stmt = db()->prepare('SELECT quote_no, status FROM quotations WHERE id=?');
-        $stmt->execute([$id]);
-        $quote = $stmt->fetch();
-        if (!$quote) json_response(['error' => 'Quotation not found'], 404);
-        if ($quote['status'] === 'CONVERTED') json_response(['error' => 'A converted quotation cannot be deleted'], 409);
-        db()->beginTransaction();
-        db()->prepare('DELETE FROM quotation_items WHERE quotation_id=?')->execute([$id]);
-        db()->prepare('DELETE FROM quotations WHERE id=?')->execute([$id]);
-        db()->commit();
-        audit($user['username'], 'DELETE_QUOTATION', $quote['quote_no']);
-        json_response(['ok' => true]);
+        $result = quotation_delete($user, $id);
+        if ($result === null) json_response(['error' => 'Quotation not found'], 404);
+        json_response($result);
     }
 
     if ($action === 'accept_quotation') {
@@ -565,6 +583,11 @@ try {
         json_response(['ok' => true]);
     }
 
+    if ($action === 'update_product') {
+        $user = require_role(['ADMIN','MANAGER']);
+        json_response(product_update($user, input_json()));
+    }
+
     if ($action === 'restock_product') {
         $user = require_role(['ADMIN','MANAGER']);
         $d = input_json();
@@ -597,7 +620,7 @@ try {
         $defs = [
             'customers' => ['ADMIN','MANAGER', ['name','phone','email','kra_pin']],
             'suppliers' => ['ADMIN','MANAGER', ['name','phone','email','kra_pin']],
-            'employees' => ['ADMIN', ['name','phone','role','salary']],
+            'employees' => ['ADMIN','MANAGER', ['name','phone','role','salary']],
             'branches' => ['ADMIN','MANAGER', ['name','location','phone']],
             'expenses' => ['ADMIN','MANAGER', ['title','category','amount','paid_by']],
             'cash_transactions' => ['ADMIN','MANAGER', ['type','category','description','amount','reference','created_by']],

@@ -113,11 +113,51 @@ the bottom for reference.
 - [x] **Catalogue-only Products page** — The Add product form is hidden for
       employees; the product list remains visible, and restock/stock movement
       panels stay hidden.
+- [x] **Recent sales limited** — The Sales page hides the recent-sales history
+      from employees; only ADMIN and MANAGER see it.
+- [x] **Editable customer/supplier details** — The People page Edit action
+      updates name, phone, email, and KRA PIN through `update_person`, with an
+      audit entry and no change to historical sale snapshots.
+- [x] **Editable quotations** — Admins and managers can change a quotation's
+      customer name and KRA PIN, add or remove products, and adjust quantities.
+      Existing lines keep their price/name snapshots, totals and VAT are
+      recalculated, and converted quotations are locked.
+- [x] **Cash-flow ledger** — The Cash Flow page lists recorded expenses and
+      manual cash movements for the selected period. Admins can edit either
+      kind of entry; managers see the table read-only.
+- [x] **Editable employees and branches** — Employees and branches on the Admin
+      page can be edited by ADMIN and MANAGER; only admins can delete them.
+      Managers can open the Admin page for these tables, with admin-only panels
+      hidden. The duplicate expenses table was removed from the Admin page.
+- [x] **Editable product prices** — The Products table has an Edit action for
+      ADMIN and MANAGER covering selling price, buying price, VAT rate, and
+      catalogue details. Stock, supplied quantity, and stock movements stay
+      untouched, completed sales keep their price snapshots, and buying price
+      remains hidden from roles without `cost.view`. Each change writes an
+      `UPDATE_PRODUCT` audit entry with old and new values.
+- [x] **Quotation deletion** — Roles with `records.delete` can delete a
+      quotation from its history. Unprocessed quotes are removed with their
+      lines; converted quotes keep the sale and receipt while the stale
+      quotation link is cleared first. Deletions are audited
+      (`DELETE_QUOTATION`).
+- [x] **CSV data exports** — The Admin page has a **Data exports** panel with
+      six downloads: cash flow, analytics, quotations, customers, suppliers,
+      and products. Exports are built live from the database, follow the
+      selected report periods, include every matching record (not just the
+      300-row on-screen limit), escape spreadsheet-formula strings, write
+      amounts in display units, hide buying price and cost figures without
+      `cost.view`, and record an `EXPORT_CSV` audit entry per download.
 - [x] **Server-published pages** — `role_pages()` supplies the allowed page ids at
       login and session refresh, and the browser re-checks page access.
 - [x] **API enforcement** — Employees cannot add products, create suppliers, or
-      list customers/suppliers.
-- [x] **Test coverage** — `tests/phase5_smoke.php` (19 checks).
+      list customers, suppliers, sales, or sale items.
+- [x] **Test coverage** — `tests/phase5_smoke.php` (22 checks),
+      `tests/people_smoke.php` (27 checks),
+      `tests/quotation_edit_smoke.php` (47 checks),
+      `tests/cashflow_smoke.php` (49 checks),
+      `tests/staff_smoke.php` (52 checks),
+      `tests/product_edit_smoke.php` (69 checks), and
+      `tests/csv_export_smoke.php` (15 checks).
 
 ## Completed in Phase 1 (reference)
 

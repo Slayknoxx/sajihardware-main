@@ -166,3 +166,34 @@
 .stock-out{color:#9b1c31;font-weight:700;white-space:nowrap}
 @media (max-width:980px){.restock-form{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:620px){.restock-form{grid-template-columns:1fr}}
+
+/* Customer/supplier editor */
+.person-edit-panel{width:min(460px,94vw)}
+.person-edit-actions{grid-template-columns:1fr 1fr}
+
+/* Quotation editor */
+.quotation-edit-panel{width:min(760px,96vw);max-height:92vh;overflow-y:auto;text-align:left}
+.quotation-edit-lines{margin-top:4px}
+.quotation-edit-lines table{margin:0}
+.quote-editor-qty{min-height:38px;width:88px;padding:6px 8px}
+.quotation-add-line{display:grid;grid-template-columns:minmax(220px,1fr) 92px auto;gap:10px;align-items:center}
+.quotation-add-line select,.quotation-add-line input,.quotation-add-line button{min-height:46px}
+.quotation-edit-actions{grid-template-columns:1fr 1fr}
+@media (max-width:620px){.quotation-add-line{grid-template-columns:1fr}}
+
+/* Cash-flow ledger editor */
+.cash-entry-edit-panel{width:min(480px,94vw);text-align:left}
+.cash-entry-edit-actions{grid-template-columns:1fr 1fr}
+
+/* Employee/branch editor */
+.staff-edit-panel{width:min(460px,94vw);text-align:left}
+.staff-edit-actions{grid-template-columns:1fr 1fr}
+
+/* Product price editor */
+.product-edit-panel{width:min(720px,96vw);max-height:92vh;text-align:left}
+.product-edit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.product-edit-grid label{display:grid;gap:7px;font-weight:700}
+.product-edit-note{grid-column:1/-1}
+.product-edit-hint{grid-column:1/-1;margin:0}
+.product-edit-actions{grid-template-columns:1fr 1fr}
+@media (max-width:640px){.product-edit-grid{grid-template-columns:1fr}}

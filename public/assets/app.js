@@ -2,7 +2,7 @@ let csrfToken = '';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok){const error=new Error(j.error||'Request failed'); error.code=j.code; error.license=j.license; throw error;} return j});
 const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
-const state = {user:null, permissions:{}, pages:[], products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1};
+const state = {user:null, permissions:{}, pages:[], products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1, people:{customers:[],suppliers:[]}, cashEntries:[], staff:{employees:[],branches:[]}};
 const money = n => `KES ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const showPaymentLoading = (label='Waiting for M-Pesa confirmation...') => {
   const modal = document.getElementById('paymentLoadingModal');
@@ -49,7 +49,7 @@ const pages = [
   ['analytics','Analytics',['ADMIN','MANAGER']],
   ['cashflow','Cash Flow',['ADMIN','MANAGER']],
   ['stockanalytics','Stock Analytics',['ADMIN','MANAGER']],
-  ['admin','Admin',['ADMIN']],
+  ['admin','Admin',['ADMIN','MANAGER']],
   ['reports','Reports & Backups',['ADMIN','MANAGER']],
   ['settings','Settings',['ADMIN','MANAGER','EMPLOYEE']],
 ];
@@ -123,11 +123,17 @@ function startConnectionMonitor(){
   window.addEventListener('offline', () => setConnectionStatus(false, 'Offline'));
   if (!healthTimer) healthTimer = setInterval(checkConnection, 15000);
 }
+function canViewSales(){
+  return ['ADMIN','MANAGER'].includes(state.user?.role);
+}
 function applyRoleVisibility(){
   const canManageProducts = ['ADMIN','MANAGER'].includes(state.user?.role);
   qs('#productForm')?.classList.toggle('hidden', !canManageProducts);
   qs('#restockPanel')?.classList.toggle('hidden', !canManageProducts);
   qs('#stockMovementsPanel')?.classList.toggle('hidden', !canManageProducts);
+  qs('#recentSalesPanel')?.classList.toggle('hidden', !canViewSales());
+  const isAdmin = state.user?.role === 'ADMIN';
+  qsa('.admin-only').forEach(element => element.classList.toggle('hidden', !isAdmin));
 }
 function showApp(){
   qs('#login').classList.add('hidden'); qs('#app').classList.remove('hidden');
@@ -282,9 +288,11 @@ async function loadDashboard(){
 async function loadSales(){
   state.products = (await api('list&table=products', null, 'GET')).rows;
   const heldSales = (await api('list&table=held_sales', null, 'GET')).rows;
-  const salesRows = (await api('list&table=sales', null, 'GET')).rows;
   renderProducts(); renderCart(); renderHeldSales(heldSales);
-  renderSalesHistory(salesRows, '#salesHistoryTable');
+  if (canViewSales()) {
+    const salesRows = (await api('list&table=sales', null, 'GET')).rows;
+    renderSalesHistory(salesRows, '#salesHistoryTable');
+  }
 }
 function renderSalesHistory(rows, targetSelector){
   const target = qs(targetSelector);
@@ -463,17 +471,63 @@ async function printReceipt(id){
 }
 async function loadProducts(){
   const rows=(await api('list&table=products', null, 'GET')).rows;
-  qs('#productsTable').innerHTML=table(rows);
+  state.products = rows;
+  qs('#productsTable').innerHTML=renderProductTable(rows);
   const canManageProducts = ['ADMIN','MANAGER'].includes(state.user?.role);
   qs('#productForm').classList.toggle('hidden', !canManageProducts);
   qs('#restockPanel').classList.toggle('hidden', !canManageProducts);
   qs('#stockMovementsPanel').classList.toggle('hidden', !canManageProducts);
+  qsa('[data-edit-product]').forEach(button => button.onclick = () => openProductEditor(+button.dataset.editProduct));
   if (canManageProducts) {
     const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
     qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+    qs('#productEditSupplier').innerHTML='<option value="">Unassigned</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
     renderRestockProducts(rows);
     await loadStockMovements();
   }
+}
+function renderProductTable(rows){
+  if (!rows.length) return '<p class="muted">No products yet.</p>';
+  const canEdit = ['ADMIN','MANAGER'].includes(state.user?.role);
+  const showCost = !!state.permissions['cost.view'];
+  return `<table><thead><tr><th>SKU</th><th>Product</th><th>Stock</th>${showCost?'<th>Buying</th>':''}<th>Selling</th><th>VAT</th><th>Branch</th><th>Supplier</th>${canEdit?'<th>Action</th>':''}</tr></thead><tbody>${rows.map(p=>{
+    const stock = Number(p.quantity) || 0;
+    const low = stock <= (Number(p.reorder_level) || 0);
+    const meta = [p.category, p.brand].filter(Boolean).map(esc).join(' · ');
+    return `<tr><td>${esc(p.sku||'')}</td><td><b>${esc(p.name||'')}</b><br><small class="muted">${meta}</small></td><td class="${low?'stock-low':''}">${stock}${low?' <small>low</small>':''}</td>${showCost?`<td>${money(p.buying_price)}</td>`:''}<td>${money(p.selling_price)}</td><td>${vatLabel(p.vat_rate)}</td><td>${esc(p.branch||'Main')}</td><td>${esc(p.supplier_name||'Unassigned')}</td>${canEdit?`<td><button class="secondary" type="button" data-edit-product="${p.id}">Edit</button></td>`:''}</tr>`;
+  }).join('')}</tbody></table>`;
+}
+function vatLabel(rate){
+  const percent = Number(rate || 0) * 100;
+  return `${Number(percent.toFixed(2))}%`;
+}
+function openProductEditor(id){
+  const product = (state.products || []).find(item => Number(item.id) === Number(id));
+  if (!product) return toast('Product not found');
+  const form = qs('#productEditForm');
+  form.reset();
+  form.elements['id'].value = product.id;
+  form.elements['sku'].value = product.sku || '';
+  form.elements['barcode'].value = product.barcode || '';
+  form.elements['name'].value = product.name || '';
+  form.elements['category'].value = product.category || '';
+  form.elements['brand'].value = product.brand || '';
+  form.elements['warehouse'].value = product.warehouse || 'Main';
+  form.elements['branch'].value = product.branch || 'Main';
+  form.elements['supplier_id'].value = product.supplier_id ?? '';
+  form.elements['buying_price'].value = product.buying_price ?? '';
+  form.elements['selling_price'].value = product.selling_price ?? '';
+  form.elements['vat_rate'].value = product.vat_rate ?? '';
+  form.elements['reorder_level'].value = product.reorder_level ?? 0;
+  const showCost = !!state.permissions['cost.view'];
+  qs('#productBuyingWrap').classList.toggle('hidden', !showCost);
+  form.elements['buying_price'].disabled = !showCost;
+  qs('#productEditTitle').textContent = `Edit ${product.name}`;
+  qs('#productEditModal').classList.remove('hidden');
+  form.elements['selling_price'].focus();
+}
+function closeProductEditor(){
+  qs('#productEditModal').classList.add('hidden');
 }
 function renderRestockProducts(rows){
   const select = qs('#restockProduct');
@@ -497,13 +551,40 @@ async function loadStockMovements(){
 }
 async function loadPeople(){
   const c=(await api('list&table=customers', null, 'GET')).rows, s=(await api('list&table=suppliers', null, 'GET')).rows;
+  state.people = {customers:c, suppliers:s};
   qs('#peopleTables').innerHTML='<h2>Customers</h2>'+peopleTable(c,'customers')+'<h2>Suppliers</h2>'+peopleTable(s,'suppliers');
+  qsa('[data-edit-person]').forEach(button => button.onclick = () => openPersonEditor(button.dataset.table, +button.dataset.editPerson));
   qsa('[data-delete-person]').forEach(button => button.onclick = () => deletePerson(button.dataset.table, +button.dataset.deletePerson));
 }
 function peopleTable(rows, tableName){
   if (!rows.length) return '<p class="muted">No records yet.</p>';
   const canDelete = !!state.permissions['records.delete'];
-  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th>${canDelete ? '<th>Action</th>' : ''}</tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.name||'')}</td><td>${esc(row.phone||'')}</td><td>${esc(row.email||'')}</td><td>${esc(row.kra_pin||'')}</td>${canDelete ? `<td><button class="danger" type="button" data-delete-person="${row.id}" data-table="${esc(tableName)}">Delete</button></td>` : ''}</tr>`).join('')}</tbody></table>`;
+  const canEdit = ['ADMIN','MANAGER'].includes(state.user?.role);
+  const hasActions = canEdit || canDelete;
+  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th>${hasActions ? '<th>Action</th>' : ''}</tr></thead><tbody>${rows.map(row=>{
+    const actions = [
+      canEdit ? `<button class="secondary" type="button" data-edit-person="${row.id}" data-table="${esc(tableName)}">Edit</button>` : '',
+      canDelete ? `<button class="danger" type="button" data-delete-person="${row.id}" data-table="${esc(tableName)}">Delete</button>` : '',
+    ].filter(Boolean).join(' ');
+    return `<tr><td>${esc(row.name||'')}</td><td>${esc(row.phone||'')}</td><td>${esc(row.email||'')}</td><td>${esc(row.kra_pin||'')}</td>${hasActions ? `<td>${actions}</td>` : ''}</tr>`;
+  }).join('')}</tbody></table>`;
+}
+function openPersonEditor(table, id){
+  const row = (state.people?.[table] || []).find(item => Number(item.id) === Number(id));
+  if (!row) return toast('Record not found');
+  const form = qs('#personEditForm');
+  form.elements['table'].value = table;
+  form.elements['id'].value = row.id;
+  form.elements['name'].value = row.name || '';
+  form.elements['phone'].value = row.phone || '';
+  form.elements['email'].value = row.email || '';
+  form.elements['kra_pin'].value = row.kra_pin || '';
+  qs('#personEditTitle').textContent = table === 'suppliers' ? 'Edit supplier' : 'Edit customer';
+  qs('#personEditModal').classList.remove('hidden');
+  form.elements['name'].focus();
+}
+function closePersonEditor(){
+  qs('#personEditModal').classList.add('hidden');
 }
 async function deletePerson(table, id){
   if (!window.confirm('Delete this record permanently?')) return;
@@ -512,14 +593,20 @@ async function deletePerson(table, id){
 async function loadQuotations(){
   const rows=(await api('list&table=quotations', null, 'GET')).rows;
   qs('#quotationsTable').innerHTML=renderQuotationHistory(rows);
+  qsa('[data-edit-quotation]').forEach(button => button.onclick = () => openQuotationEditor(+button.dataset.editQuotation).catch(error=>toast(error.message)));
   renderQuoteCart();
+}
+function canEditQuotations(){
+  return ['ADMIN','MANAGER'].includes(state.user?.role);
 }
 function renderQuotationHistory(rows){
   if(!rows.length) return '<p class="muted">No quotations yet.</p>';
+  const canEdit = canEditQuotations();
+  const canDelete = !!state.permissions['records.delete'];
   return `<table><thead><tr><th>Quotation</th><th>Customer</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows.map(row=>{
     const accepted= row.status === 'ACCEPTED';
     const converted= row.status === 'CONVERTED';
-    return `<tr><td>${esc(row.quote_no)}</td><td>${esc(row.customer_name||'')}</td><td>${money(row.total)}</td><td>${esc(row.status)}</td><td>${esc(receiptDate(row.created_at))}</td><td><button class="secondary" type="button" data-view-quotation="${row.id}">Receipt</button> <button class="secondary" type="button" data-pdf-quotation="${row.id}">PDF</button> ${!converted && !accepted ? `<button class="secondary" type="button" data-accept-quotation="${row.id}">Accept</button>` : ''} ${accepted ? `<button class="primary" type="button" data-convert-quotation="${row.id}">Add to sales</button>` : ''} ${converted ? `<button class="secondary" type="button" data-view-sale="${row.converted_sale_id}">Sale receipt</button>` : ''} ${!converted && state.permissions['records.delete'] ? `<button class="danger" type="button" data-delete-quotation="${row.id}">Delete</button>` : ''}</td></tr>`;
+    return `<tr><td>${esc(row.quote_no)}</td><td>${esc(row.customer_name||'')}</td><td>${money(row.total)}</td><td>${esc(row.status)}</td><td>${esc(receiptDate(row.created_at))}</td><td>${canEdit && !converted ? `<button class="secondary" type="button" data-edit-quotation="${row.id}">Edit</button> ` : ''}<button class="secondary" type="button" data-view-quotation="${row.id}">Receipt</button> <button class="secondary" type="button" data-pdf-quotation="${row.id}">PDF</button> ${!converted && !accepted ? `<button class="secondary" type="button" data-accept-quotation="${row.id}">Accept</button>` : ''} ${accepted ? `<button class="primary" type="button" data-convert-quotation="${row.id}">Add to sales</button>` : ''} ${converted ? `<button class="secondary" type="button" data-view-sale="${row.converted_sale_id}">Sale receipt</button>` : ''} ${canDelete ? `<button class="danger" type="button" data-delete-quotation="${row.id}" data-converted="${converted}">Delete</button>` : ''}</td></tr>`;
   }).join('')}</tbody></table>`;
 }
 async function quotationDetail(id){ return api(`quotation_detail&id=${id}`, null, 'GET'); }
@@ -528,12 +615,12 @@ async function printQuotation(id){
   const company = r.company || state.company || {};
   const items=(r.items||[]).map(item=>`<tr><td>${esc(item.product_name)}</td><td>${esc(item.quantity)}</td><td>${money(item.unit_price)}</td><td>${money(item.total)}</td></tr>`).join('');
   const div=document.createElement('section'); div.className='receipt-print';
-  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${esc(company.logo)}"><h2>${esc(company.name)}</h2><p>${esc(company.location)}<br>${esc(company.email)}${company.phone ? `<br>${esc(company.phone)}` : ''}</p><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${esc(q.quote_no)}</b><br>${esc(receiptDate(q.created_at))}<br>Valid until: ${esc(q.valid_until||'Not specified')}</p><p>Customer: <b>${esc(q.customer_name||'Walk-in Customer')}</b></p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
+  div.innerHTML=`<div class="receipt-shell quotation-receipt"><img class="receipt-logo" src="${esc(company.logo)}"><h2>${esc(company.name)}</h2><p>${esc(company.location)}<br>${esc(company.email)}${company.phone ? `<br>${esc(company.phone)}` : ''}</p><h3>QUOTATION RECEIPT</h3><p>Quotation No: <b>${esc(q.quote_no)}</b><br>${esc(receiptDate(q.created_at))}<br>Valid until: ${esc(q.valid_until||'Not specified')}</p><p>Customer: <b>${esc(q.customer_name||'Walk-in Customer')}</b>${q.customer_kra_pin ? `<br>KRA PIN: ${esc(q.customer_kra_pin)}` : ''}</p><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Amt</th></tr></thead><tbody>${items}</tbody></table><div class="receipt-divider"></div><p>Subtotal: ${money(q.subtotal)}<br>Discount: ${money(q.discount)}<br>VAT: ${money(q.tax)}<br>Total: <b>${money(q.total)}</b></p><div class="receipt-divider"></div><p>This is a quotation, not an official tax receipt.</p></div>`;
   const previousTitle=document.title;
   document.title=`Quotation Receipt ${q.quote_no}`;
   document.body.appendChild(div); window.print(); div.remove(); document.title=previousTitle;
 }
-async function deleteQuotation(id){ if(!window.confirm('Delete this quotation permanently?')) return; try{await api('delete_quotation',{id});await loadQuotations();toast('Quotation deleted')}catch(error){toast(error.message)} }
+async function deleteQuotation(id, converted){ const message=converted ? 'Delete this converted quotation permanently? Its sale and sale receipt will be kept.' : 'Delete this quotation permanently?'; if(!window.confirm(message)) return; try{await api('delete_quotation',{id});await loadQuotations();toast('Quotation deleted')}catch(error){toast(error.message)} }
 async function acceptQuotation(id){ try{await api('accept_quotation',{id});await loadQuotations();toast('Quotation marked as accepted')}catch(error){toast(error.message)} }
 async function convertQuotation(id){
   const paymentMethod=window.prompt('Payment method (Cash, M-Pesa, Card, Credit, etc.)','Cash');
@@ -541,6 +628,95 @@ async function convertQuotation(id){
   const amountPaid=window.prompt('Amount paid', '0');
   if(amountPaid===null) return;
   try{const r=await api('convert_quotation',{id,payment_method:paymentMethod,amount_paid:+amountPaid||0});await loadQuotations();toast(`Sale created: ${r.receipt_no}`);await printReceipt(r.sale_id)}catch(error){toast(error.message)}
+}
+const quoteEditor = {id:null, discount:0, lines:[], nextKey:1};
+async function openQuotationEditor(id){
+  if(!canEditQuotations()) return toast('You do not have permission to edit quotations');
+  const detail = await quotationDetail(id);
+  const quote = detail.quotation;
+  if(quote.status === 'CONVERTED') return toast('A converted quotation can no longer be edited');
+  state.products = (await api('list&table=products', null, 'GET')).rows;
+  quoteEditor.id = Number(quote.id);
+  quoteEditor.discount = Number(quote.discount)||0;
+  quoteEditor.lines = (detail.items||[]).map(item => ({
+    key: `existing-${item.id}`,
+    id: Number(item.id),
+    product_id: Number(item.product_id),
+    name: item.product_name || '',
+    price: Number(item.unit_price)||0,
+    qty: Number(item.quantity)||1,
+  }));
+  const form = qs('#quotationEditForm');
+  form.elements['id'].value = quoteEditor.id;
+  form.elements['customer_name'].value = quote.customer_name || '';
+  form.elements['customer_kra_pin'].value = quote.customer_kra_pin || '';
+  qs('#quotationEditTitle').textContent = `Edit ${quote.quote_no}`;
+  populateQuotationProducts();
+  renderQuotationEditorLines();
+  qs('#quotationEditModal').classList.remove('hidden');
+  form.elements['customer_name'].focus();
+}
+function populateQuotationProducts(){
+  const select = qs('#quotationAddProduct');
+  select.innerHTML = '<option value="">Select product</option>' + state.products.map(product => `<option value="${esc(product.id)}">${esc(product.sku)} — ${esc(product.name)} (${money(product.selling_price)})</option>`).join('');
+}
+function addQuotationEditorLine(){
+  const select = qs('#quotationAddProduct');
+  const productId = Number(select.value);
+  if(!productId) return toast('Choose a product to add');
+  const quantity = Math.trunc(Number(qs('#quotationAddQty').value)||0);
+  if(quantity < 1 || quantity > 10000) return toast('Enter a quantity between 1 and 10000');
+  const product = state.products.find(item => Number(item.id) === productId);
+  if(!product) return toast('Product not found');
+  const existing = quoteEditor.lines.find(line => Number(line.product_id) === productId);
+  if(existing){
+    existing.qty = Math.min(10000, existing.qty + quantity);
+  } else {
+    quoteEditor.lines.push({
+      key: `new-${quoteEditor.nextKey++}`,
+      id: null,
+      product_id: productId,
+      name: product.name || '',
+      price: Number(product.selling_price)||0,
+      qty: quantity,
+    });
+  }
+  select.value = '';
+  qs('#quotationAddQty').value = '1';
+  renderQuotationEditorLines();
+}
+function renderQuotationEditorLines(){
+  const target = qs('#quotationEditLines');
+  target.innerHTML = quoteEditor.lines.length
+    ? `<table><thead><tr><th>Product</th><th>Unit price</th><th>Qty</th><th>Total</th><th></th></tr></thead><tbody>${quoteEditor.lines.map(line => `<tr><td>${esc(line.name)}</td><td>${money(line.price)}</td><td><input class="quote-editor-qty" type="number" min="1" max="10000" step="1" value="${esc(line.qty)}" data-quote-qty="${esc(line.key)}"></td><td data-quote-line-total="${esc(line.key)}">${money(line.price*line.qty)}</td><td><button class="danger" type="button" data-quote-remove-line="${esc(line.key)}">Remove</button></td></tr>`).join('')}</tbody></table>`
+    : '<p class="muted">Add at least one product.</p>';
+  qsa('[data-quote-qty]').forEach(input => input.onchange = () => {
+    const line = quoteEditor.lines.find(item => item.key === input.dataset.quoteQty);
+    if(!line) return;
+    const quantity = Math.trunc(Number(input.value)||0);
+    if(quantity < 1 || quantity > 10000){ input.value = line.qty; return toast('Enter a quantity between 1 and 10000'); }
+    line.qty = quantity;
+    const cell = qs(`[data-quote-line-total="${line.key}"]`);
+    if(cell) cell.textContent = money(line.price*line.qty);
+    renderQuotationEditorTotals();
+  });
+  qsa('[data-quote-remove-line]').forEach(button => button.onclick = () => {
+    quoteEditor.lines = quoteEditor.lines.filter(item => item.key !== button.dataset.quoteRemoveLine);
+    renderQuotationEditorLines();
+  });
+  renderQuotationEditorTotals();
+}
+function renderQuotationEditorTotals(){
+  const subtotal = quoteEditor.lines.reduce((sum, line) => sum + line.price*line.qty, 0);
+  const discount = Math.min(Math.max(0, quoteEditor.discount), subtotal);
+  const total = Math.max(0, subtotal - discount);
+  qs('#quotationEditTotals').innerHTML = `<div><span>Subtotal</span><b>${money(subtotal)}</b></div><div><span>Discount</span><b>${money(discount)}</b></div><div><span>VAT</span><b>Recalculated on save</b></div><div class="grand"><span>Total</span><b>${money(total)}</b></div>`;
+}
+function closeQuotationEditor(){
+  qs('#quotationEditModal').classList.add('hidden');
+  quoteEditor.id = null;
+  quoteEditor.lines = [];
+  quoteEditor.discount = 0;
 }
 async function viewSaleReceipt(id){ await printReceipt(id); }
 async function loadCashFlow(){
@@ -550,7 +726,49 @@ async function loadCashFlow(){
   qs('#cashFlowCardsPage').innerHTML=`<section class="kpi">Cash sales<strong>${money(cash.cash_sales)}</strong></section><section class="kpi">Manual income<strong>${money(cash.other_income)}</strong></section><section class="kpi">Total expenses<strong>${money(cash.expenses)}</strong></section><section class="kpi">Net cash<strong>${money(cash.net_cash)}</strong><span>${profitable?'Profit':'Loss'}</span></section>`;
   const max=Math.max(1,...result.series.map(row=>Math.max(Number(row.income),Number(row.expenses))));
   qs('#cashFlowChart').innerHTML=result.series.length ? result.series.map(row=>{const income=Number(row.income), expenses=Number(row.expenses), net=income-expenses;return `<div class="cash-flow-bar ${net<0?'loss':''}" title="Income ${money(income)} | Expenses ${money(expenses)} | ${net<0?'Loss':'Profit'} ${money(Math.abs(net))}"><b>${net<0?'Loss':'Profit'} ${money(Math.abs(net))}</b><span style="height:${Math.max(4,Math.round(Math.max(income,expenses)/max*150))}px"></span><small>${esc(row.bucket)}</small></div>`}).join('') : '<p class="muted">No cash-flow activity for this period.</p>';
+  state.cashEntries = result.entries || [];
+  renderCashFlowEntries(state.cashEntries);
   qs('#cashFlowDate').value=date;
+}
+function renderCashFlowEntries(rows){
+  const target = qs('#cashFlowEntries');
+  if(!target) return;
+  const canEdit = state.user?.role === 'ADMIN';
+  if(!rows?.length){
+    target.innerHTML = '<p class="muted">No expenses or cash movements for this period.</p>';
+    return;
+  }
+  target.innerHTML = `<table><thead><tr><th>Date</th><th>Type</th><th>Category</th><th>Description</th><th>Amount</th><th>Reference / Paid by</th>${canEdit ? '<th>Action</th>' : ''}</tr></thead><tbody>${rows.map(row => {
+    const isIncome = row.source === 'cash_transaction' && row.type === 'INCOME';
+    const typeLabel = row.source === 'expense' ? 'Expense' : (isIncome ? 'Cash in' : 'Cash out');
+    const amountClass = isIncome ? 'stock-in' : 'stock-out';
+    return `<tr><td>${esc(receiptDate(row.created_at))}</td><td>${esc(typeLabel)}</td><td>${esc(row.category || '')}</td><td>${esc(row.description || '')}</td><td class="${amountClass}">${money(row.amount)}</td><td>${esc(row.reference || '—')}</td>${canEdit ? `<td><button class="secondary" type="button" data-edit-cash-entry="${row.id}" data-source="${esc(row.source)}">Edit</button></td>` : ''}</tr>`;
+  }).join('')}</tbody></table>`;
+  qsa('[data-edit-cash-entry]').forEach(button => button.onclick = () => openCashEntryEditor(button.dataset.source, +button.dataset.editCashEntry));
+}
+function openCashEntryEditor(source, id){
+  if(state.user?.role !== 'ADMIN') return toast('Only an admin can edit cash-flow entries');
+  const entry = state.cashEntries.find(row => row.source === source && Number(row.id) === Number(id));
+  if(!entry) return toast('Entry not found');
+  const form = qs('#cashEntryEditForm');
+  const isExpense = source === 'expense';
+  form.elements['source'].value = source;
+  form.elements['id'].value = entry.id;
+  form.elements['type'].value = entry.type === 'INCOME' ? 'INCOME' : 'EXPENSE';
+  form.elements['category'].value = entry.category || '';
+  form.elements['description'].value = entry.description || '';
+  form.elements['amount'].value = Number(entry.amount) || 0;
+  form.elements['reference'].value = entry.reference || '';
+  qs('#cashEntryTypeWrap').classList.toggle('hidden', isExpense);
+  qs('#cashEntryEditTitle').textContent = isExpense ? 'Edit expense' : 'Edit cash movement';
+  qs('#cashEntryDescriptionLabel').textContent = isExpense ? 'Title' : 'Description';
+  qs('#cashEntryReferenceLabel').textContent = isExpense ? 'Paid by' : 'Reference';
+  form.elements['description'].required = isExpense;
+  qs('#cashEntryEditModal').classList.remove('hidden');
+  form.elements['category'].focus();
+}
+function closeCashEntryEditor(){
+  qs('#cashEntryEditModal').classList.add('hidden');
 }
 async function loadStockAnalytics(){
   const result = await api('stock_analytics', null, 'GET');
@@ -773,19 +991,105 @@ function renderQuoteCart(){
   qs('#quoteTotals').innerHTML=`<div><span>Subtotal</span><b>${money(subtotal)}</b></div><div><span>VAT</span><b>Calculated by server</b></div><div class="grand"><span>Total</span><b>${money(total)}</b></div>`;
 }
 async function createQuotation(){
-  const r=await api('create_quotation',{customer_name:qs('#quoteCustomer').value,valid_until:qs('#quoteValidUntil').value,discount:+qs('#quoteDiscount').value||0,cart:state.cart});
+  const r=await api('create_quotation',{customer_name:qs('#quoteCustomer').value,customer_kra_pin:qs('#quoteCustomerKraPin').value,valid_until:qs('#quoteValidUntil').value,discount:+qs('#quoteDiscount').value||0,cart:state.cart});
   state.cart=[]; renderQuoteCart(); await loadQuotations(); toast(`Quotation saved: ${r.quote_no}`);
 }
 async function loadAdmin(){
+  const isAdmin = state.user?.role === 'ADMIN';
   const parts=[];
-  const users = (await api('list&table=users', null, 'GET')).rows;
-  parts.push('<h2>Employee accounts</h2>' + renderUserAccounts(users));
-  for (const t of ['employees','branches','expenses']) parts.push(`<h2>${t}</h2>`+table((await api(`list&table=${t}`, null, 'GET')).rows));
+  if (isAdmin) {
+    const users = (await api('list&table=users', null, 'GET')).rows;
+    parts.push('<h2>Employee accounts</h2>' + renderUserAccounts(users));
+  }
+  const employees = (await api('list&table=employees', null, 'GET')).rows;
+  const branches = (await api('list&table=branches', null, 'GET')).rows;
+  state.staff = {employees, branches};
+  parts.push('<h2>Employees</h2>' + renderStaffTable('employees', employees));
+  parts.push('<h2>Branches</h2>' + renderStaffTable('branches', branches));
   qs('#adminTables').innerHTML=parts.join('');
-  qsa('[data-toggle-user]').forEach(button => button.onclick = () => setUserActive(+button.dataset.toggleUser, button.dataset.active !== '1'));
-  qsa('[data-delete-user]').forEach(button => button.onclick = () => deleteUser(+button.dataset.deleteUser));
-  qsa('[data-reset-user]').forEach(button => button.onclick = () => resetUserPassword(+button.dataset.resetUser));
-  await Promise.all([loadSystemHealth(), loadAudit()]);
+  qsa('[data-edit-staff]').forEach(button => button.onclick = () => openStaffEditor(button.dataset.editStaff, +button.dataset.staffId));
+  qsa('[data-delete-staff]').forEach(button => button.onclick = () => deleteStaff(button.dataset.deleteStaff, +button.dataset.staffId));
+  if (isAdmin) {
+    qsa('[data-toggle-user]').forEach(button => button.onclick = () => setUserActive(+button.dataset.toggleUser, button.dataset.active !== '1'));
+    qsa('[data-delete-user]').forEach(button => button.onclick = () => deleteUser(+button.dataset.deleteUser));
+    qsa('[data-reset-user]').forEach(button => button.onclick = () => resetUserPassword(+button.dataset.resetUser));
+    await Promise.all([loadSystemHealth(), loadAudit()]);
+  }
+}
+async function downloadCsv(type){
+  const params = new URLSearchParams({action:'export_csv', type});
+  if(type === 'analytics'){
+    params.set('period', analyticsState.period);
+    params.set('start', analyticsState.start);
+    params.set('end', analyticsState.end);
+  } else if(type === 'cash_flow'){
+    params.set('period', qs('#cashFlowPeriod').value || 'month');
+    params.set('date', qs('#cashFlowDate').value || new Date().toISOString().slice(0,10));
+  }
+  const response = await fetch(`../api.php?${params}`, {method:'GET', credentials:'same-origin'});
+  if(!response.ok){
+    const result = await response.json();
+    throw new Error(result.error || 'CSV export failed');
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `${type}.csv`;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`${filename} downloaded`);
+}
+function renderStaffTable(tableName, rows){
+  if (!rows.length) return '<p class="muted">No records yet.</p>';
+  const canDelete = state.user?.role === 'ADMIN';
+  const actionCell = row => {
+    const edit = `<button class="secondary" type="button" data-edit-staff="${esc(tableName)}" data-staff-id="${row.id}">Edit</button>`;
+    const remove = canDelete ? ` <button class="danger" type="button" data-delete-staff="${esc(tableName)}" data-staff-id="${row.id}">Delete</button>` : '';
+    return edit + remove;
+  };
+  if (tableName === 'employees') {
+    return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Salary</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name || '')}</td><td>${esc(row.phone || '')}</td><td>${esc(row.role || '')}</td><td>${money(row.salary)}</td><td>${Number(row.active) === 1 ? 'Active' : 'Inactive'}</td><td>${actionCell(row)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+  return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Location</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name || '')}</td><td>${esc(row.location || '')}</td><td>${esc(row.phone || '')}</td><td>${Number(row.active) === 1 ? 'Active' : 'Inactive'}</td><td>${actionCell(row)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function openStaffEditor(tableName, id){
+  const row = (state.staff?.[tableName] || []).find(item => Number(item.id) === Number(id));
+  if (!row) return toast('Record not found');
+  const isBranch = tableName === 'branches';
+  const form = qs('#staffEditForm');
+  form.elements['table'].value = tableName;
+  form.elements['id'].value = row.id;
+  form.elements['name'].value = row.name || '';
+  form.elements['phone'].value = row.phone || '';
+  form.elements['role'].value = row.role || '';
+  form.elements['salary'].value = Number(row.salary) || 0;
+  form.elements['location'].value = row.location || '';
+  form.elements['active'].value = Number(row.active) === 0 ? '0' : '1';
+  qs('#staffEditTitle').textContent = isBranch ? 'Edit branch' : 'Edit employee';
+  qs('#staffRoleWrap').classList.toggle('hidden', isBranch);
+  qs('#staffSalaryWrap').classList.toggle('hidden', isBranch);
+  qs('#staffLocationWrap').classList.toggle('hidden', !isBranch);
+  form.elements['role'].required = !isBranch;
+  qs('#staffEditModal').classList.remove('hidden');
+  form.elements['name'].focus();
+}
+function closeStaffEditor(){
+  qs('#staffEditModal').classList.add('hidden');
+}
+async function deleteStaff(tableName, id){
+  if (!window.confirm(`Delete this ${tableName === 'branches' ? 'branch' : 'employee'} permanently?`)) return;
+  try {
+    await api('delete_staff', {table: tableName, id});
+    await loadAdmin();
+    toast(tableName === 'branches' ? 'Branch deleted' : 'Employee deleted');
+  } catch (error) {
+    toast(error.message);
+  }
 }
 function renderUserAccounts(rows){
   if (!rows.length) return '<p class="muted">No employee accounts yet.</p>';
@@ -1103,6 +1407,7 @@ qs('#deactivateLicenseBtn').onclick=async()=>{
   }catch(err){toast(err.message)}
 };
 qs('#backupRefreshBtn').onclick=()=>loadBackups().catch(error=>toast(error.message));
+qsa('[data-export-csv]').forEach(button=>button.onclick=()=>downloadCsv(button.dataset.exportCsv).catch(error=>toast(error.message)));
 qs('#autoBackupToggle').onchange=async e=>{
   try{
     await api('save_settings', {backup_auto_enabled: e.target.checked ? 1 : 0});
@@ -1159,12 +1464,86 @@ document.addEventListener('click', event=>{
   if(button.dataset.pdfQuotation) printQuotation(+button.dataset.pdfQuotation).catch(error=>toast(error.message));
   if(button.dataset.acceptQuotation) acceptQuotation(+button.dataset.acceptQuotation);
   if(button.dataset.convertQuotation) convertQuotation(+button.dataset.convertQuotation);
-  if(button.dataset.deleteQuotation) deleteQuotation(+button.dataset.deleteQuotation);
+  if(button.dataset.deleteQuotation) deleteQuotation(+button.dataset.deleteQuotation, button.dataset.converted === 'true');
   if(button.dataset.viewSale) viewSaleReceipt(+button.dataset.viewSale).catch(error=>toast(error.message));
 });
 qsa('.simpleForm').forEach(f=>f.onsubmit=async e=>{e.preventDefault(); try{await api(`save_simple&table=${f.dataset.table}`, formData(f)); f.reset(); await openPage(state.page); toast('Saved')}catch(err){toast(err.message)}});
 qs('#userForm').onsubmit=async e=>{e.preventDefault(); try{await api('create_user', formData(e.target)); e.target.reset(); await loadAdmin(); toast('User created')}catch(err){toast(err.message)}};
 qs('#resetBusinessForm').onsubmit=async e=>{e.preventDefault(); if(!window.confirm('This will permanently delete all business data. Continue?')) return; try{await api('reset_business_data',formData(e.target));e.target.reset();await openPage('dashboard');toast('Business data reset. User accounts were preserved.')}catch(err){toast(err.message)}};
+qs('#productEditCancel').onclick=closeProductEditor;
+qs('#productEditModal').onclick=e=>{ if(e.target===qs('#productEditModal')) closeProductEditor(); };
+qs('#productEditForm').onsubmit=async e=>{
+  e.preventDefault();
+  try {
+    const result = await api('update_product', formData(e.target));
+    closeProductEditor();
+    await loadProducts();
+    toast(result.changed ? `Updated ${result.sku}` : 'No changes to save');
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#personEditCancel').onclick=closePersonEditor;
+qs('#personEditModal').onclick=e=>{ if(e.target===qs('#personEditModal')) closePersonEditor(); };
+qs('#personEditForm').onsubmit=async e=>{
+  e.preventDefault();
+  try {
+    await api('update_person', formData(e.target));
+    closePersonEditor();
+    await loadPeople();
+    toast('Details updated');
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#staffEditCancel').onclick=closeStaffEditor;
+qs('#staffEditModal').onclick=e=>{ if(e.target===qs('#staffEditModal')) closeStaffEditor(); };
+qs('#staffEditForm').onsubmit=async e=>{
+  e.preventDefault();
+  try {
+    await api('update_staff', formData(e.target));
+    closeStaffEditor();
+    await loadAdmin();
+    toast('Details updated');
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#cashEntryEditCancel').onclick=closeCashEntryEditor;
+qs('#cashEntryEditModal').onclick=e=>{ if(e.target===qs('#cashEntryEditModal')) closeCashEntryEditor(); };
+qs('#cashEntryEditForm').onsubmit=async e=>{
+  e.preventDefault();
+  try {
+    await api('update_cash_entry', formData(e.target));
+    closeCashEntryEditor();
+    await loadCashFlow();
+    toast('Entry updated');
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#quotationAddBtn').onclick=addQuotationEditorLine;
+qs('#quotationEditCancel').onclick=closeQuotationEditor;
+qs('#quotationEditModal').onclick=e=>{ if(e.target===qs('#quotationEditModal')) closeQuotationEditor(); };
+qs('#quotationEditForm').onsubmit=async e=>{
+  e.preventDefault();
+  if(!quoteEditor.lines.length) return toast('Add at least one product');
+  const data = formData(e.target);
+  const payload = {
+    id: quoteEditor.id,
+    customer_name: data.customer_name,
+    customer_kra_pin: data.customer_kra_pin,
+    items: quoteEditor.lines.map(line => line.id ? {id:line.id, quantity:line.qty} : {product_id:line.product_id, quantity:line.qty}),
+  };
+  try {
+    await api('update_quotation', payload);
+    closeQuotationEditor();
+    await loadQuotations();
+    toast('Quotation updated');
+  } catch (error) {
+    toast(error.message);
+  }
+};
 qs('#roleSettingsForm').onsubmit=async e=>{
   e.preventDefault();
   const permissions = {};

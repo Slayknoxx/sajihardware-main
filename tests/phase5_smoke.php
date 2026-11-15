@@ -42,7 +42,7 @@ check('employees have a reduced workspace', count($employee) < count($admin), (s
 
 check('managers keep the dashboard', in_array('dashboard', $manager, true));
 check('managers keep customers and suppliers', in_array('people', $manager, true));
-check('managers cannot open admin', !in_array('admin', $manager, true));
+check('managers can open the staff and branch admin page', in_array('admin', $manager, true));
 
 check('admins open the dashboard', in_array('dashboard', $admin, true));
 check('admins open admin', in_array('admin', $admin, true));
@@ -56,9 +56,13 @@ check('employee pages are a subset of admin pages', array_diff($employee, $admin
 // customer/supplier reads for employees. Guard the source so those regressions
 // are caught even without a running browser.
 $api = (string)file_get_contents(__DIR__ . '/../api.php');
+$js = (string)file_get_contents(__DIR__ . '/../public/assets/app.js');
 check('product creation is limited to admins and managers', preg_match("/save_product'\\s*\\)\\s*\\{\\s*require_role\\(\\['ADMIN','MANAGER'\\]\\)/", $api) === 1);
 check('supplier creation is limited to admins and managers', preg_match("/create_supplier'\\s*\\)\\s*\\{\\s*require_role\\(\\['ADMIN','MANAGER'\\]\\)/", $api) === 1);
 check('customer and supplier lists are limited to admins and managers', str_contains($api, "in_array(\$table, ['customers', 'suppliers'], true)"));
+check('sales history is limited to admins and managers', str_contains($api, "in_array(\$table, ['sales', 'sale_items'], true)"));
+check('recent sales panel is hidden by role', str_contains($js, "qs('#recentSalesPanel')"));
+check('employees skip the sales history fetch', str_contains($js, 'if (canViewSales())'));
 
 echo "\n{$checks} checks, {$failures} failure(s)\n";
 exit($failures === 0 ? 0 : 1);

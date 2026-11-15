@@ -21,6 +21,7 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 - Business analytics with selectable periods, comparisons, revenue trends, top products and cashiers, payment mix, inventory, expenses, sales mix, customers, and eTIMS compliance.
 - Collapsible sidebar that remembers its state and switches to an icon rail on narrow or split windows.
 - Restocking from the Products page, with an optional buying-price update and a visible stock movement ledger.
+- Editing an existing product's selling price, buying price, VAT rate, category, supplier, and reorder level without changing stock; completed sales keep their original price snapshots.
 - Employee accounts are limited to Sales, the product catalogue, Quotations, and Settings — no Dashboard, Customers & Suppliers, or product-entry form.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
 - Atomic checkout transaction so stock and sale records are not partially saved.
@@ -154,6 +155,11 @@ key off the build machine and delete local copies once customer keys are issued.
   failed import never leaves a partial file behind.
 - Product updates change descriptive fields and prices but never overwrite stock.
 - Limits: 5,000 data rows per file, 200 preview rows shown.
+- **Admin → Data exports** downloads current cash flow, analytics, quotation,
+  customer, supplier, and product data as CSV. Analytics and cash flow use the
+  selected report periods; exports include all matching records.
+- Product buying prices and analytics cost figures remain restricted by the
+  user's cost-view permission.
 
 ### Money And Checkout Safety
 
@@ -316,22 +322,82 @@ history, role checks, and the analytics inventory link. 38 checks.
 - The Products page is catalogue-only for employees: the **Add product** form is
   hidden, while the product list stays visible. Restock and stock movement panels
   remain hidden as before.
+- The **Recent sales** panel on the Sales page is limited to ADMIN and MANAGER;
+  employees see the checkout and held sales only.
+- **Customers & Suppliers** records can be edited in place. The **Edit** action
+  opens a small form for name, phone, email, and KRA PIN, then refreshes the
+  table. Sales keep their original customer-name snapshot, so receipts do not
+  change retroactively.
+- **Quotations** can be edited by ADMIN and MANAGER. The **Edit** action changes
+  the customer name and KRA PIN, adds or removes products, and adjusts
+  quantities. Existing lines keep their name/price snapshots, new lines use the
+  current product price, and totals/VAT are recalculated. Converted quotations
+  are locked because they already produced a sale.
+- **Cash Flow** shows a combined **Expenses & cash movements** table for the
+  selected period. Admins can edit an expense or manual cash movement in place;
+  managers can read the table but see no Edit action. Summary cards and the
+  chart refresh after each edit.
+- **Employees and Branches** on the Admin page can be edited by ADMIN and
+  MANAGER, with **Delete** reserved for admins. Managers can open the Admin page
+  for these tables, while account creation, expense entry, reset, CSV import,
+  system health, and audit history stay hidden and API-protected for admins.
+  The duplicate expenses table was removed from the Admin page.
+- **Products** rows have an **Edit** action for ADMIN and MANAGER. It changes
+  the selling price, buying price, VAT rate, name, SKU, category, brand, branch,
+  supplier, and reorder level while leaving stock quantity, supplied quantity,
+  and stock movements untouched. Buying price is only shown and changed for
+  roles with `cost.view`, so managers keep an unseen cost intact. Completed
+  sales and quotations keep their own price/name snapshots, and each edit
+  writes an `UPDATE_PRODUCT` audit entry with the old and new values plus an
+  optional note. Stock still moves only through Restock.
+- **Quotations can be deleted** by roles with the `records.delete` permission
+  via the **Delete** action in the quotation history. Deleting an unprocessed
+  quotation removes its lines; deleting a converted quotation keeps the sale
+  and its receipt but clears the stale quotation link first, so the sale stays
+  intact. Each deletion writes a `DELETE_QUOTATION` audit entry.
+- **Data exports** on the Admin page download the current data as CSV: cash
+  flow, analytics, quotations, customers, suppliers, and products. Analytics
+  and cash-flow exports follow the selected report periods, and every matching
+  record is included — not just the 300 rows the on-screen tables show.
+  Buying prices and analytics cost figures stay hidden for roles without
+  `cost.view`, amounts are written in display units, spreadsheet-formula
+  strings are escaped, and each export writes an `EXPORT_CSV` audit entry.
 - The allowed page list is issued by the server (`role_pages()` in `lib.php`) at
   login and on session refresh. The browser also re-checks it, so a stale or
   manually opened page falls back to the role's first allowed page.
 - The API enforces the same boundary: employees cannot add products, create
-  suppliers, or list customers/suppliers. Those requests are rejected with 403.
-- Managers and admins keep their existing workspace.
+  suppliers, or list customers, suppliers, sales, or sale items. Those requests
+  are rejected with 403.
+- Managers and admins otherwise keep their existing workspace.
 
-### Phase 5 Test Suite
+### Phase 5 Test Suites
 
 ```powershell
 php -c .\php-runtime.ini tests\phase5_smoke.php
+php -c .\php-runtime.ini tests\people_smoke.php
+php -c .\php-runtime.ini tests\quotation_edit_smoke.php
+php -c .\php-runtime.ini tests\cashflow_smoke.php
+php -c .\php-runtime.ini tests\staff_smoke.php
+php -c .\php-runtime.ini tests\product_edit_smoke.php
+php -c .\php-runtime.ini tests\csv_export_smoke.php
 ```
 
-Covers employee page restrictions, manager/admin access, unknown roles, and the
-API role gates for product creation, supplier creation, and customer/supplier
-lists. 19 checks.
+The first covers employee page restrictions, manager/admin access, unknown roles,
+and the API role gates for product creation, supplier creation, customer/supplier
+lists, and sales history (22 checks). The second covers customer and supplier
+editing, audit entries, validation, and no-change behavior on rejected edits
+(27 checks). The third covers quotation line add/remove, quantity changes, price
+snapshots, customer name/KRA PIN updates, totals, converted-quote locking,
+quotation deletion with preserved sales, and role enforcement (47 checks). The
+fourth covers the combined cash-flow ledger, expense and cash-movement edits,
+audit entries, validation, admin-only editing, and the report/ledger link used
+by exports (49 checks). The fifth covers employee and branch edits, unique branch
+names, validation, admin-only deletion, and manager access (52 checks). The
+sixth covers product price and detail edits, preserved stock and sale snapshots,
+partial updates, manager cost restrictions, SKU uniqueness, validation, and API
+role gates (69 checks). The seventh covers live CSV exports: full record sets,
+report periods, cost visibility, formula escaping, money units, validation, and
+API role gates (15 checks).
 
 ## Default Login
 
@@ -420,9 +486,15 @@ saji_hardware_pos_web/
   router.php               Router for the built-in server with traversal guard
   lib/
     analytics.php         Business analytics periods, KPIs, and reports
+    exports.php           Current-data CSV exports
     import.php            CSV templates, parsing, validation/preview, commit
     license.php            License states, clock guard, activation, check-in
+    cashflow.php           Cash-flow ledger and admin entry editing
+    people.php             Customer and supplier record editing
+    products.php           Existing product price and detail editing
+    quotations.php         Quotation line and customer detail editing
     security.php           CSRF, security headers, origin checks, throttling
+    staff.php              Employee and branch record editing
     stock.php              Restocking and stock movement history
   tests/                   Phase 1–5 regression suites and helpers
   tools/

@@ -19,6 +19,7 @@ This project is designed for:
 - Quotations and held sales
 - Cash and sales reports
 - Business analytics and stock analytics
+- Current-data CSV exports from the Admin page
 - Restocking and stock movement history
 - Role-based workspace: employees see sales, the product catalogue, quotations, and settings only
 - Collapsible sidebar that adapts to narrow windows
@@ -34,6 +35,12 @@ Files important to deployment:
 - [lib.php](lib.php) - shared logic and DB setup
 - [lib/analytics.php](lib/analytics.php) - business analytics periods and reports
 - [lib/stock.php](lib/stock.php) - restocking and stock movement history
+- [lib/cashflow.php](lib/cashflow.php) - cash-flow ledger and admin entry editing
+- [lib/people.php](lib/people.php) - customer and supplier record editing
+- [lib/quotations.php](lib/quotations.php) - quotation line and customer detail editing
+- [lib/products.php](lib/products.php) - existing product price and detail editing
+- [lib/exports.php](lib/exports.php) - current-data CSV exports
+- [lib/staff.php](lib/staff.php) - employee and branch record editing
 - [.env](.env) - environment configuration
 - [data/saji_pos.sqlite3](data/saji_pos.sqlite3) - local SQLite database
 
@@ -302,7 +309,38 @@ new quantity and movement appear in the stock ledger.
 Existing databases pick up the new stock movement indexes automatically on the
 first request after upgrade; no manual migration is needed. Log in with an
 employee account and confirm **Dashboard** and **Customers & Suppliers** are
-absent and the Products page has no Add product form.
+absent, the Products page has no Add product form, and the Sales page has no
+Recent sales panel. On **Customers & Suppliers**, use **Edit** to change a
+record and confirm the table refreshes with the new details. On **Quotations**,
+an admin or manager can use **Edit** to change the customer name and KRA PIN,
+add or remove products, and adjust quantities; converted quotations show no Edit
+action. On **Cash Flow**, confirm the **Expenses & cash movements** table lists
+the period's entries, then edit a row as an admin and confirm the cards and chart
+refresh. A manager should see the same table without Edit actions.
+
+On **Admin**, confirm the Employees and Branches tables have Edit actions for
+both admins and managers, and Delete only for admins. Managers should see the
+Employees and Branches tables without the account, import, health, audit, reset,
+or expense panels. The old expenses table should no longer appear on Admin; use
+the Cash Flow ledger instead.
+
+On **Products**, use **Edit** on a stocked product and change its selling price.
+Confirm the catalogue shows the new price while the stock quantity is unchanged,
+no new stock movement appears, and an `UPDATE_PRODUCT` audit entry records the
+old and new values. A manager should see the same Edit action without the buying
+price field; saving must leave the stored buying price untouched. Previously
+completed sales should still print their original prices.
+
+On **Quotations**, a role with record-deletion permission should see **Delete**
+on a quotation. Deleting an unprocessed quote removes it; deleting a converted
+quote must keep the sale and its receipt working afterwards.
+
+On **Admin**, use the **Data exports** buttons to download each CSV: products,
+customers, suppliers, quotations, cash flow, and analytics. Cash flow and
+analytics exports should follow the report periods currently selected on their
+pages. Open a product CSV as an admin and confirm the buying-price column and
+current stock; as a manager the buying-price column must be absent. Confirm
+`EXPORT_CSV` entries appear in the audit history for each download.
 
 ---
 

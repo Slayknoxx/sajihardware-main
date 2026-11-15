@@ -95,7 +95,7 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <div class="section-heading"><h2>Held sales</h2><span class="muted">Continue a sale saved for later</span></div>
                 <div id="heldSalesList"></div>
             </section>
-            <section class="panel held-sales-panel">
+            <section class="panel held-sales-panel" id="recentSalesPanel">
                 <h2>Recent sales</h2>
                 <div id="salesHistoryTable" class="table-wrap"></div>
             </section>
@@ -162,6 +162,7 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <h2>New quotation</h2>
                 <div class="form-grid">
                     <input id="quoteCustomer" placeholder="Customer name" value="Walk-in Customer">
+                    <input id="quoteCustomerKraPin" maxlength="40" placeholder="KRA PIN">
                     <input id="quoteValidUntil" type="date" placeholder="Valid until">
                     <input id="quoteDiscount" type="number" min="0" step="0.01" placeholder="Discount">
                 </div>
@@ -205,6 +206,15 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <div id="cashFlowCardsPage" class="kpis"></div>
                 <div id="cashFlowChart" class="cash-flow-chart"></div>
             </section>
+            <section class="panel" style="margin-top:16px">
+                <div class="section-heading">
+                    <div>
+                        <h2>Expenses &amp; cash movements</h2>
+                        <span class="muted">Entries for the selected period. Admins can edit a row.</span>
+                    </div>
+                </div>
+                <div id="cashFlowEntries" class="table-wrap"></div>
+            </section>
             <form class="panel simpleForm" data-table="cash_transactions" style="margin-top:16px"><h2>Manual cash movement</h2><div class="form-grid"><select name="type"><option>INCOME</option><option>EXPENSE</option></select><input name="category" placeholder="Category" required><input name="description" placeholder="Description"><input name="amount" type="number" min="0" step="0.01" placeholder="Amount" required><input name="reference" placeholder="Reference"></div><button class="primary">Add movement</button></form>
         </section>
 
@@ -221,13 +231,13 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
 
         <section id="admin" class="view hidden">
             <div class="cards-2">
-                <form id="userForm" class="panel"><h2>Create account</h2><input name="full_name" placeholder="Full name"><input name="username" placeholder="Username"><input name="password" placeholder="Temporary password"><select name="role"><option>EMPLOYEE</option><option>MANAGER</option><option>ADMIN</option></select><input name="branch" value="Main"><button class="primary">Create user</button></form>
+                <form id="userForm" class="panel admin-only"><h2>Create account</h2><input name="full_name" placeholder="Full name"><input name="username" placeholder="Username"><input name="password" placeholder="Temporary password"><select name="role"><option>EMPLOYEE</option><option>MANAGER</option><option>ADMIN</option></select><input name="branch" value="Main"><button class="primary">Create user</button></form>
                 <form class="panel simpleForm" data-table="employees"><h2>Employees</h2><input name="name" placeholder="Name"><input name="phone" placeholder="Phone"><input name="role" placeholder="Role"><input name="salary" type="number" placeholder="Salary"><button class="primary">Save employee</button></form>
                 <form class="panel simpleForm" data-table="branches"><h2>Branches</h2><input name="name" placeholder="Branch name"><input name="location" placeholder="Location"><input name="phone" placeholder="Phone"><button class="primary">Save branch</button></form>
-                <form class="panel simpleForm" data-table="expenses"><h2>Expenses</h2><input name="title" placeholder="Title"><input name="category" placeholder="Category"><input name="amount" type="number" placeholder="Amount"><input name="paid_by" placeholder="Paid by"><button class="primary">Record expense</button></form>
-                <form id="resetBusinessForm" class="panel"><h2>Start afresh</h2><p class="muted">Deletes sales, stock, customers, suppliers, quotations, expenses, cash movements, employees, branches, and operational history. User accounts are preserved.</p><input name="confirmation" placeholder="Type RESET BUSINESS DATA"><button class="danger" type="submit">Delete all business data</button></form>
+                <form class="panel simpleForm admin-only" data-table="expenses"><h2>Expenses</h2><input name="title" placeholder="Title"><input name="category" placeholder="Category"><input name="amount" type="number" placeholder="Amount"><input name="paid_by" placeholder="Paid by"><button class="primary">Record expense</button></form>
+                <form id="resetBusinessForm" class="panel admin-only"><h2>Start afresh</h2><p class="muted">Deletes sales, stock, customers, suppliers, quotations, expenses, cash movements, employees, branches, and operational history. User accounts are preserved.</p><input name="confirmation" placeholder="Type RESET BUSINESS DATA"><button class="danger" type="submit">Delete all business data</button></form>
             </div>
-            <section id="importPanel" class="panel" style="margin-top:16px">
+            <section id="importPanel" class="panel admin-only" style="margin-top:16px">
                 <div class="section-heading"><h2>CSV import</h2><span class="muted">Preview first; nothing is written until you import</span></div>
                 <div class="form-grid">
                     <label>Data type<select id="importType"><option value="products">Products</option><option value="customers">Customers</option><option value="suppliers">Suppliers</option></select></label>
@@ -241,12 +251,23 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 </div>
                 <div id="importPreviewResult" class="table-wrap"></div>
             </section>
+            <section class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>Data exports</h2><span class="muted">Download current data. Analytics and cash flow use their selected report periods.</span></div>
+                <div class="button-row">
+                    <button class="secondary" type="button" data-export-csv="cash_flow">Cash flow CSV</button>
+                    <button class="secondary" type="button" data-export-csv="analytics">Analytics CSV</button>
+                    <button class="secondary" type="button" data-export-csv="quotations">Quotations CSV</button>
+                    <button class="secondary" type="button" data-export-csv="customers">Customers CSV</button>
+                    <button class="secondary" type="button" data-export-csv="suppliers">Suppliers CSV</button>
+                    <button class="secondary" type="button" data-export-csv="products">Products CSV</button>
+                </div>
+            </section>
             <div id="adminTables" class="panel table-wrap"></div>
-            <section id="systemHealthPanel" class="panel" style="margin-top:16px">
+            <section id="systemHealthPanel" class="panel admin-only" style="margin-top:16px">
                 <div class="section-heading"><h2>System health</h2><button id="healthRefreshBtn" class="secondary" type="button">Refresh</button></div>
                 <div id="systemHealth"></div>
             </section>
-            <section id="auditPanel" class="panel" style="margin-top:16px">
+            <section id="auditPanel" class="panel admin-only" style="margin-top:16px">
                 <div class="section-heading"><h2>Audit history</h2><div class="toolbar"><input id="auditSearch" placeholder="Search actor, action, details"><button id="auditSearchBtn" class="secondary" type="button">Search</button></div></div>
                 <div id="auditTable" class="table-wrap"></div>
                 <div class="button-row"><button id="auditPreviousBtn" class="secondary" type="button">Previous</button><span id="auditPageLabel" class="muted"></span><button id="auditNextBtn" class="secondary" type="button">Next</button></div>
@@ -357,6 +378,101 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         <p class="muted">Give this password to the user securely.</p>
         <button id="tempPasswordCloseBtn" class="primary" type="button">Done</button>
     </div>
+</div>
+<div id="productEditModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="productEditForm" class="setup-panel stack product-edit-panel">
+        <h2 id="productEditTitle">Edit product</h2>
+        <input type="hidden" name="id">
+        <div class="product-edit-grid">
+            <label>SKU<input name="sku" maxlength="80" required></label>
+            <label>Barcode<input name="barcode" maxlength="80"></label>
+            <label>Product name<input name="name" maxlength="120" required></label>
+            <label>Category<input name="category" maxlength="80" required></label>
+            <label>Brand<input name="brand" maxlength="80"></label>
+            <label>Warehouse<input name="warehouse" maxlength="80"></label>
+            <label>Branch<input name="branch" maxlength="80"></label>
+            <label>Supplier<select name="supplier_id" id="productEditSupplier"><option value="">Unassigned</option></select></label>
+            <label id="productBuyingWrap">Buying price<input name="buying_price" type="number" min="0" step="0.01"></label>
+            <label>Selling price<input name="selling_price" type="number" min="0" step="0.01" required></label>
+            <label>VAT rate<input name="vat_rate" type="number" min="0" max="1" step="0.01" required></label>
+            <label>Reorder level<input name="reorder_level" type="number" min="0" step="1"></label>
+            <label class="product-edit-note">Note<input name="note" maxlength="200" placeholder="Reason for the change (optional)"></label>
+        </div>
+        <p class="muted product-edit-hint">Stock quantity is unchanged. Use Restock to add units. Completed sales keep their original prices.</p>
+        <div class="button-row product-edit-actions">
+            <button id="productEditCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Save changes</button>
+        </div>
+    </form>
+</div>
+<div id="personEditModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="personEditForm" class="setup-panel stack person-edit-panel">
+        <h2 id="personEditTitle">Edit customer</h2>
+        <input type="hidden" name="table">
+        <input type="hidden" name="id">
+        <label>Name<input name="name" maxlength="120" required></label>
+        <label>Phone<input name="phone" maxlength="40"></label>
+        <label>Email<input name="email" type="email" maxlength="120"></label>
+        <label>KRA PIN<input name="kra_pin" maxlength="40"></label>
+        <div class="button-row person-edit-actions">
+            <button id="personEditCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Save changes</button>
+        </div>
+    </form>
+</div>
+<div id="staffEditModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="staffEditForm" class="setup-panel stack staff-edit-panel">
+        <h2 id="staffEditTitle">Edit employee</h2>
+        <input type="hidden" name="table">
+        <input type="hidden" name="id">
+        <label>Name<input name="name" maxlength="120" required></label>
+        <label>Phone<input name="phone" maxlength="40"></label>
+        <label id="staffRoleWrap">Role<input name="role" maxlength="80"></label>
+        <label id="staffSalaryWrap">Salary<input name="salary" type="number" min="0" step="0.01"></label>
+        <label id="staffLocationWrap" class="hidden">Location<input name="location" maxlength="120"></label>
+        <label>Status<select name="active"><option value="1">Active</option><option value="0">Inactive</option></select></label>
+        <div class="button-row staff-edit-actions">
+            <button id="staffEditCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Save changes</button>
+        </div>
+    </form>
+</div>
+<div id="cashEntryEditModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="cashEntryEditForm" class="setup-panel stack cash-entry-edit-panel">
+        <h2 id="cashEntryEditTitle">Edit entry</h2>
+        <input type="hidden" name="source">
+        <input type="hidden" name="id">
+        <label id="cashEntryTypeWrap">Type<select name="type"><option value="INCOME">Cash in</option><option value="EXPENSE">Cash out</option></select></label>
+        <label>Category<input name="category" maxlength="80" required></label>
+        <label><span id="cashEntryDescriptionLabel">Description</span><input name="description" maxlength="255"></label>
+        <label>Amount<input name="amount" type="number" min="0" step="0.01" required></label>
+        <label><span id="cashEntryReferenceLabel">Reference</span><input name="reference" maxlength="120"></label>
+        <div class="button-row cash-entry-edit-actions">
+            <button id="cashEntryEditCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Save changes</button>
+        </div>
+    </form>
+</div>
+<div id="quotationEditModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="quotationEditForm" class="setup-panel stack quotation-edit-panel">
+        <h2 id="quotationEditTitle">Edit quotation</h2>
+        <input type="hidden" name="id">
+        <div class="form-grid">
+            <label>Customer name<input name="customer_name" maxlength="120" required></label>
+            <label>KRA PIN<input name="customer_kra_pin" maxlength="40"></label>
+        </div>
+        <div id="quotationEditLines" class="table-wrap quotation-edit-lines"></div>
+        <div class="quotation-add-line">
+            <select id="quotationAddProduct"><option value="">Select product</option></select>
+            <input id="quotationAddQty" type="number" min="1" max="10000" step="1" value="1" placeholder="Qty">
+            <button id="quotationAddBtn" class="secondary" type="button">Add product</button>
+        </div>
+        <div id="quotationEditTotals" class="totals"></div>
+        <div class="button-row quotation-edit-actions">
+            <button id="quotationEditCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Save changes</button>
+        </div>
+    </form>
 </div>
 <script src="assets/app.js"></script>
 </body>
