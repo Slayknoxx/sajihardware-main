@@ -21,6 +21,12 @@ This project is designed for:
 - Business analytics and stock analytics
 - Current-data CSV exports from the Admin page
 - Restocking and stock movement history
+- Purchase orders with partial receiving, automatic supplier-credit posting, and a supplier payments form
+- Credit sales with customer payments and receivables ageing
+- Returns against a receipt with automatic restocking
+- Cash shift reconciliation (opening float, expected vs declared, with cash in/out from manual movements, supplier payments and cash refunds)
+- Admin-only full-field product and supplier editing with audit trail, including customer credit balance corrections
+- Extended payment methods: Cash, M-Pesa, Card, Bank, Mobile Money, Voucher, Credit
 - Role-based workspace: employees see sales, the product catalogue, quotations, and settings only
 - Collapsible sidebar that adapts to narrow windows
 - KCB STK push / M-Pesa integration
@@ -41,6 +47,11 @@ Files important to deployment:
 - [lib/products.php](lib/products.php) - existing product price and detail editing
 - [lib/exports.php](lib/exports.php) - current-data CSV exports
 - [lib/staff.php](lib/staff.php) - employee and branch record editing
+- [lib/credit.php](lib/credit.php) - credit sales, customer payments, and receivables
+- [lib/returns.php](lib/returns.php) - product-linked sale returns
+- [lib/purchases.php](lib/purchases.php) - purchase orders, receiving, supplier credit, and supplier payments
+- [lib/shifts.php](lib/shifts.php) - cash shift reconciliation
+- [lib/reset.php](lib/reset.php) - "Start afresh" business-data wipe
 - [.env](.env) - environment configuration
 - [data/saji_pos.sqlite3](data/saji_pos.sqlite3) - local SQLite database
 
@@ -318,6 +329,17 @@ action. On **Cash Flow**, confirm the **Expenses & cash movements** table lists
 the period's entries, then edit a row as an admin and confirm the cards and chart
 refresh. A manager should see the same table without Edit actions.
 
+In the **Manual cash movement** form, choose **EXPENSE** and confirm the
+category field becomes the 21-item expense list; choosing **INCOME** returns it
+to free text. Record an expense, then open **Analytics → Expenses** and confirm
+the category appears in the table with its total, while the categories with no
+spend are listed separately below.
+
+On **Analytics → Expenses**, the **Entries** table lists each expense and manual
+cash-out for the selected period. As an admin, use **Edit** on one row, change
+the category or amount, and confirm both the Entries table and the By-category
+total refresh. A manager sees the same tables with no Edit actions.
+
 On **Admin**, confirm the Employees and Branches tables have Edit actions for
 both admins and managers, and Delete only for admins. Managers should see the
 Employees and Branches tables without the account, import, health, audit, reset,
@@ -330,6 +352,13 @@ no new stock movement appears, and an `UPDATE_PRODUCT` audit entry records the
 old and new values. A manager should see the same Edit action without the buying
 price field; saving must leave the stored buying price untouched. Previously
 completed sales should still print their original prices.
+
+Next to **Edit**, use **Delete** on a product that has no sales, quotations,
+purchase orders, or returns. The confirmation names any stock that will be
+discarded, the row disappears from the table, and a `DELETE_PRODUCT` audit entry
+records the SKU and units. Trying the same on a product with a sale line must
+show “... cannot be deleted” and leave the product in place. A manager sees the
+same Delete action.
 
 On **Quotations**, a role with record-deletion permission should see **Delete**
 on a quotation. Deleting an unprocessed quote removes it; deleting a converted

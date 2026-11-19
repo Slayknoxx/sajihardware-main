@@ -22,41 +22,7 @@ the bottom for reference.
 
 ## Analytics follow-ups
 
-- [ ] **G1 — Cost snapshot on `sale_items`**
-  - Gross profit currently uses each product's current `buying_price`, so past
-    periods change when prices are edited. Add `sale_items.cost_price` captured
-    at checkout and switch profit reporting to it. This is the only blocker for
-    accurate historical margin.
-
-- [ ] **G2 — Branch-level analytics**
-  - `sales` has no `branch_id`. Add it (populated from the logged-in user) before
-    any per-branch KPI or comparison.
-
-- [ ] **G3 — Credit sales / receivables**
-  - No credit checkout path exists, so debtor ageing and receivables analytics are
-    deferred until credit sales are a real workflow.
-
-- [ ] **G4 — Returns linked to products**
-  - `returns` has no product link and no API/UI, so return rate and net revenue by
-    product are unavailable.
-
-- [ ] **G5 — Purchase-order lines and receiving**
-  - `purchase_orders` has no line items or received quantity, blocking landed
-    cost, supplier price trends, and true margin. Phase 4 restocking records
-    units received for an existing product, but it does not create or receive a
-    purchase order, so this remains open.
-
-- [ ] **G6 — Cash shift reconciliation**
-  - `cash_shifts` is unused. Till short/over and cashier cash variance need
-    open/close screens.
-
-- [ ] **G7 — More payment methods**
-  - Only Cash and M-Pesa are accepted; card/bank/mobile-money splits need an
-    extended payment-method allow-list.
-
-- [ ] **G8 — Named customers**
-  - Walk-in sales dominate. Analytics labels walk-in figures as approximate;
-    reliable retention needs phone capture or named customers at checkout.
+Closed in Phase 6 — see "Completed in Phase 6" below.
 
 ## Completed in Phase 2
 
@@ -92,7 +58,7 @@ the bottom for reference.
       potential margin above the supplier sell-through table.
 - [x] **Collapsible sidebar** — Menu toggle, persisted preference, submenu
       layout, and automatic icon rail on split/narrow windows.
-- [x] **Test coverage** — `tests/analytics_smoke.php` (50 checks).
+- [x] **Test coverage** — `tests/analytics_smoke.php` (51 checks).
 
 ## Completed in Phase 4
 
@@ -104,6 +70,57 @@ the bottom for reference.
 - [x] **Role enforcement** — Restocking and movement history are limited to
       ADMIN and MANAGER; employees see no restock controls.
 - [x] **Test coverage** — `tests/restock_smoke.php` (38 checks).
+
+## Completed in Phase 6
+
+- [x] **G1 — Cost snapshot on `sale_items`** — Checkout and quotation conversion
+      capture `cost_price` per line at sale time. Profit reporting uses the
+      snapshot and falls back to the current `buying_price` for older sales.
+- [x] **G2 — Branch-level analytics** — `sales.branch_id` is resolved from the
+      logged-in user's branch at checkout and conversion; the analytics report
+      has a by-branch revenue/transactions table (older sales read "Unassigned").
+- [x] **G3 — Credit sales / receivables** — Credit checkout requires a saved
+      customer, records the unpaid remainder on the customer balance, and
+      payments (`create_customer_payment`, ADMIN/MANAGER) reduce it FIFO across
+      the customer's unpaid credit sales; cash payments also log a cash income
+      row. The Analytics and Cash Flow pages show outstanding credit, ageing
+      buckets (0–30/31–60/61–90/90+ days), and a debtors table.
+- [x] **G4 — Product-linked returns** — Returns are recorded against a sale line
+      (`create_return`, ADMIN/MANAGER) with quantity caps, restock the units via
+      a `RETURN` stock movement, and feed returns totals into analytics. Each
+      return stores a refund method (defaulting to the sale's payment method,
+      `None` for credit); cash refunds reduce the open shift's expected cash. The
+      Sales page has a receipt-lookup returns panel and a recent-returns table.
+- [x] **G5 — Purchase orders** — Orders carry line items (`purchase_order_items`)
+      with per-line unit cost; receiving (full or partial, ADMIN/MANAGER) adds
+      stock via `RESTOCK` movements, optionally updates the buying price, and
+      flips the order OPEN → PARTIAL → RECEIVED. Untouched orders can be
+      cancelled. The Products page has the order builder and a receive dialog.
+- [x] **G6 — Cash shift reconciliation** — Any signed-in user can open/close
+      their till shift from the Sales page. Expected cash = opening float + the
+      cashier's completed cash sales and cash income − cash expenses paid from
+      the till (manual EXPENSE movements and supplier payments) − cash refunds
+      on returns; closing stores the declared cash and variance. Cash Flow shows
+      the shift history.
+- [x] **G7 — More payment methods** — Checkout accepts Cash, M-Pesa, Card, Bank,
+      Mobile Money, Voucher, and Credit (`PAYMENT_METHODS` in `config.php`).
+      Cash keeps change logic, M-Pesa runs the STK flow, Credit tracks the
+      balance, and the rest are recorded as fully paid direct payments.
+      Quotation conversion supports every method except M-Pesa.
+- [x] **G8 — Named customers** — Checkout has a saved-customer picker
+      (`customer_options`, available to every role) that snapshots the customer
+      name and links `sales.customer_id`; free-text walk-in names still work.
+      The People page shows credit balances and a customer payment form.
+- [x] **Supplier credit** — Receiving a purchase order adds the received value
+      to the supplier balance unless *Paid upfront* is ticked; the People page
+      has a supplier payment form that reduces the balance and logs a cash
+      expense (no audit entries yet, per the agreed scope).
+- [x] **Shared restock path** — Manual restocking and purchase-order receiving
+      both call `stock_add_units()` in `lib/stock.php`, so stock, supplied
+      quantity, price, and movement history stay consistent.
+- [x] **Test coverage** - `tests/phase6_smoke.php` (96 checks),
+      `tests/admin_edit_smoke.php` (47 checks for the admin-only full-field
+      product, supplier, and customer editors, including balance corrections).
 
 ## Completed in Phase 5
 
@@ -125,6 +142,13 @@ the bottom for reference.
 - [x] **Cash-flow ledger** — The Cash Flow page lists recorded expenses and
       manual cash movements for the selected period. Admins can edit either
       kind of entry; managers see the table read-only.
+- [x] **Expense categories** — The manual cash-movement form offers the 21
+      standard business expense categories when EXPENSE is selected (and a
+      free-text category for INCOME). The Admin expense form and the cash-entry
+      editor share the list, and Analytics → Expenses groups spending by those
+      names and reports the categories with no spend for the period. The same
+      section lists the period's entries; admins can edit an entry in place while
+      managers see it read-only.
 - [x] **Editable employees and branches** — Employees and branches on the Admin
       page can be edited by ADMIN and MANAGER; only admins can delete them.
       Managers can open the Admin page for these tables, with admin-only panels
@@ -135,6 +159,11 @@ the bottom for reference.
       untouched, completed sales keep their price snapshots, and buying price
       remains hidden from roles without `cost.view`. Each change writes an
       `UPDATE_PRODUCT` audit entry with old and new values.
+- [x] **Product deletion** — ADMIN and MANAGER can delete a product from the
+      Products table with a confirmation that names any discarded stock. The
+      API refuses when a sale, quotation, purchase order, or return refers to
+      the product, and writes a `DELETE_PRODUCT` audit entry with the SKU, name,
+      and units removed.
 - [x] **Quotation deletion** — Roles with `records.delete` can delete a
       quotation from its history. Unprocessed quotes are removed with their
       lines; converted quotes keep the sale and receipt while the stale

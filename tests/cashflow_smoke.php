@@ -51,7 +51,7 @@ try {
 
     $anchor = '2026-11-14';
     $pdo->prepare('INSERT INTO expenses(title, category, amount, paid_by, created_at) VALUES(?,?,?,?,?)')
-        ->execute(['Diesel', 'Transport', 150000, 'John', $anchor . ' 09:00:00']);
+        ->execute(['Diesel', 'Transport & Fuel', 150000, 'John', $anchor . ' 09:00:00']);
     $expenseId = (int)$pdo->lastInsertId();
 
     $pdo->prepare('INSERT INTO cash_transactions(type, category, description, amount, reference, created_by, created_at) VALUES(?,?,?,?,?,?,?)')
@@ -71,6 +71,8 @@ try {
     check('ledger is newest first', ($entries[0]['description'] ?? '') === 'Water bill', (string)($entries[0]['description'] ?? ''));
     check('expense title is exposed as the description', ($entries[2]['description'] ?? '') === 'Diesel', (string)($entries[2]['description'] ?? ''));
     check('expense paid-by is exposed as the reference', ($entries[2]['reference'] ?? '') === 'John');
+    check('manual expense keeps its chart-of-accounts category', ($entries[0]['category'] ?? '') === 'Utilities'
+        && in_array($entries[0]['category'], EXPENSE_CATEGORIES, true), (string)($entries[0]['category'] ?? ''));
     $report = cash_flow_report(['period' => 'day', 'date' => $anchor]);
     check('cash-flow report uses the requested period', ($report['period'] ?? '') === 'day' && ($report['date'] ?? '') === $anchor);
     check('cash-flow report totals match the current ledger data', (int)$report['summary']['expenses'] === 175000 && (int)$report['summary']['net_cash'] === -125000);

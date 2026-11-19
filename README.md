@@ -21,7 +21,13 @@ Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScri
 - Business analytics with selectable periods, comparisons, revenue trends, top products and cashiers, payment mix, inventory, expenses, sales mix, customers, and eTIMS compliance.
 - Collapsible sidebar that remembers its state and switches to an icon rail on narrow or split windows.
 - Restocking from the Products page, with an optional buying-price update and a visible stock movement ledger.
+- Purchase orders with per-line unit costs, partial receiving, automatic PARTIAL/RECEIVED status, optional buying-price updates on delivery, and automatic supplier-credit posting (skippable with *Paid upfront*) plus a supplier payments form that reduces the balance and logs a cash expense.
+- Returns recorded against a receipt line with quantity caps, automatic restocking, and a recent-returns table.
+- Credit sales on a saved customer balance, customer payments with oldest-first settlement, receivables ageing on Analytics and Cash Flow, and supplier credit from purchase-order receiving with a supplier payments form.
+- Cash shift reconciliation: opening float, expected cash from the cashier's cash sales plus cash income minus cash expenses, declared cash, and variance, with shift history on Cash Flow.
 - Editing an existing product's selling price, buying price, VAT rate, category, supplier, and reorder level without changing stock; completed sales keep their original price snapshots.
+- Admin-only full-field editing on the Admin page: every product column (SKU, barcode, images, warehouse, stock quantity, supplied quantity, prices, VAT, supplier) and every customer and supplier column (name, phone, email, KRA PIN, credit/owed balance), with changes written to the audit log and stock adjustments recorded as movements.
+- Per-line cost snapshots at checkout so historical gross profit stays stable when buying prices change, plus per-branch sales analytics.
 - Employee accounts are limited to Sales, the product catalogue, Quotations, and Settings — no Dashboard, Customers & Suppliers, or product-entry form.
 - SQLite database stored locally in `data/saji_pos.sqlite3`, with WAL mode for better safety and concurrency.
 - Atomic checkout transaction so stock and sale records are not partially saved.
@@ -242,9 +248,12 @@ credential reset.
   no base to compare against.
 - Report sections: sales summary, revenue trend (daily or monthly buckets) and
   hourly sales for today, money in (cash/M-Pesa/open payments/discounts/voids/
-  VAT breakdown), top products by revenue and units, top cashiers, inventory,
-  expenses by category, category and brand sales mix, customer counts with top
-  customers, and an eTIMS compliance strip.
+  VAT collected), top products by revenue and units, top cashiers, inventory,
+  expenses by category (the Expenses form plus manual cash-movement expenses)
+  using a fixed 21-line chart of accounts, category and brand sales mix,
+  customer counts with top customers, and an eTIMS compliance strip. Admins
+  also see the period's individual expense entries with an Edit action, so a
+  wrong category or amount can be fixed without leaving the report.
 - Cost-derived figures — gross profit, gross margin, inventory at cost, and
   potential margin — require the `cost.view` permission. Managers and employees
   without it see **Restricted** tiles instead of numbers.
@@ -273,7 +282,8 @@ php -c .\php-runtime.ini tests\analytics_smoke.php
 
 Covers period maths (including quarter/last-month/custom ranges), shop-local day
 boundaries, confirmed-money filtering, comparison deltas, cost-permission gating,
-breakdowns, compliance counts, and empty-period behavior. 50 checks.
+breakdowns (including manual cash-movement expenses), compliance counts, and
+empty-period behavior. 51 checks.
 
 ## Phase 4 — Completed
 
@@ -284,9 +294,13 @@ breakdowns, compliance counts, and empty-period behavior. 50 checks.
   and a new buying price.
 - Restocking updates `products.quantity` and `products.supplied_quantity` inside
   one transaction, so live stock and Stock Analytics sell-through stay aligned.
+- Purchase-order receiving uses the **same primitive** (`stock_add_units()` in
+  `lib/stock.php`), so both entry points move stock, supplied quantity, price,
+  and movement history identically. PO receipts appear in Recent stock
+  movements as `RESTOCK` rows tagged with the PO number.
 - Every restock writes a `stock_movements` row with reason `RESTOCK`, the
   reference, the acting user, and a timestamp, plus a `RESTOCK_PRODUCT` audit
-  entry.
+  entry (PO receipts audit as `RECEIVE_PURCHASE_ORDER` instead).
 - **Recent stock movements** on the Products page shows opening stock, sales,
   voids, and restocks, newest first. This is also the quickest way to verify a
   restock was recorded.
@@ -337,6 +351,12 @@ history, role checks, and the analytics inventory link. 38 checks.
   selected period. Admins can edit an expense or manual cash movement in place;
   managers can read the table but see no Edit action. Summary cards and the
   chart refresh after each edit.
+- The **Manual cash movement** form on Cash Flow has a category dropdown.
+  Choosing **EXPENSE** lists the 21 standard business expense categories (Stock
+  Purchase, Freight & Clearing, Rent & Rates, Utilities, and the rest); choosing
+  **INCOME** swaps it for a free-text category. The same list drives the Admin
+  expense form and the entry editor, so Analytics → Expenses groups spending
+  consistently and lists the categories that had no spend in the period.
 - **Employees and Branches** on the Admin page can be edited by ADMIN and
   MANAGER, with **Delete** reserved for admins. Managers can open the Admin page
   for these tables, while account creation, expense entry, reset, CSV import,
@@ -350,6 +370,12 @@ history, role checks, and the analytics inventory link. 38 checks.
   sales and quotations keep their own price/name snapshots, and each edit
   writes an `UPDATE_PRODUCT` audit entry with the old and new values plus an
   optional note. Stock still moves only through Restock.
+- Products can be **deleted** by ADMIN and MANAGER from the Delete button next
+  to Edit. The confirmation names any stock that will be discarded. A product
+  is only removable while no sale, quotation, purchase order, or return refers
+  to it, so receipts, quotations, and orders never point at a missing row;
+  deleting writes a `DELETE_PRODUCT` audit entry including the SKU, name, and
+  discarded units.
 - **Quotations can be deleted** by roles with the `records.delete` permission
   via the **Delete** action in the quotation history. Deleting an unprocessed
   quotation removes its lines; deleting a converted quotation keeps the sale
@@ -398,6 +424,146 @@ partial updates, manager cost restrictions, SKU uniqueness, validation, and API
 role gates (69 checks). The seventh covers live CSV exports: full record sets,
 report periods, cost visibility, formula escaping, money units, validation, and
 API role gates (15 checks).
+
+## Phase 6 — Completed
+
+### Cost Snapshots And Branch Analytics
+
+- Every sale line now stores a **cost snapshot** (`sale_items.cost_price`),
+  captured at checkout and at quotation conversion from the product's buying
+  price at the moment of sale. Gross profit uses the snapshot first and falls
+  back to the current buying price for older sales, so historical margins no
+  longer move when prices are edited.
+- Every sale also records the **branch** (`sales.branch_id`), resolved from the
+  signed-in user's branch. The Analytics page has a **by-branch** table with
+  transactions and revenue per branch; sales made before this release read as
+  "Unassigned".
+
+### Payment Methods And Credit
+
+- Checkout accepts **Cash, M-Pesa, Card, Bank, Mobile Money, Voucher, and
+  Credit** (the shared `PAYMENT_METHODS` list in `config.php`). Cash keeps its
+  change logic, M-Pesa still runs the STK push flow, and the remaining methods
+  are recorded as fully paid direct payments.
+- **Credit** requires a saved customer and records any unpaid remainder on the
+  customer's balance. The **People** page shows each customer's credit balance
+  and a **Customer payments** form (ADMIN/MANAGER): a payment reduces the
+  balance, is allocated oldest-first across the customer's unpaid credit sales
+  (so each sale's paid amount tracks money actually received), and cash
+  payments also log a cash income entry in the Cash Flow ledger.
+- Quotation conversion supports every method except M-Pesa, with the same
+  Cash/Credit amount rules.
+- The checkout form has a **saved-customer picker** fed by a lightweight
+  `customer_options` API (id, name, phone only). Picking a customer snapshots
+  the name and links the sale; typing a name still works for walk-ins.
+  Analytics keeps its walk-in estimate for unnamed sales.
+
+### Returns
+
+- Returns are now recorded against a specific sale line with quantity caps so
+  a line cannot be returned more times than it sold. Each return restocks the
+  units through a `RETURN` stock movement, keeps the product link for
+  analytics, and writes an audit entry. ADMIN/MANAGER only.
+- Every return records a **refund method** (`Cash`, `M-Pesa`, `Card`, `Bank`,
+  `Mobile Money`, `Voucher`, or `None` for an exchange). The panel defaults to
+  the way the customer paid; credit sales default to `None` because they never
+  took money in. Cash refunds are subtracted from the open shift's expected
+  cash.
+- The Sales page has a **Returns** panel: enter a receipt number, pick the line
+  and quantity, add a reason, choose the refund method, and record. A
+  recent-returns table sits below with the refund method per row.
+
+### Purchase Orders
+
+- Purchase orders carry **line items** with per-line unit cost. Create an order
+  from the Products page: pick a supplier, add product lines (defaulting to the
+  product's buying price), set an expected date and notes.
+- **Receiving** is per line and can be partial: units go into live stock
+  through the shared restock primitive (the same one the Products page uses),
+  supplied quantity increases, and you can
+  optionally update the buying price. The order moves OPEN → PARTIAL →
+  RECEIVED automatically. Orders that have not received anything can be
+  cancelled. ADMIN/MANAGER only.
+- **Supplier credit is automatic.** Unless the receiving dialog's *Paid upfront*
+  box is ticked, each receipt adds the received value (units × the line's unit
+  cost, or the new buying price when one is entered) to the supplier's balance,
+  so goods taken on credit create a payable. The People page has a **Supplier
+  payments** form: pick a supplier, enter the amount and channel, and the
+  balance drops straight away. Cash payments also log a `Supplier payment`
+  cash expense so the Cash Flow ledger shows the money leaving the till.
+  Payments above the balance, and suppliers with nothing owed, are rejected.
+  These balance changes are not audited yet.
+
+### Supplier Payments
+
+- The **Supplier payments** form on Customers & Suppliers lists suppliers the
+  business owes first (`Nairobi Cement Ltd · we owe KES 5,000.00`) and settled
+  suppliers as `nothing owed`. Every payment is stored in `supplier_payments`
+  with its method and reference. ADMIN/MANAGER only.
+
+### Cash Shifts
+
+- Any signed-in user can open a **cash shift** with an opening float from the
+  Sales page and close it by declaring the cash in the till. Expected cash is
+  the opening float plus that cashier's completed cash sales and cash income
+  (manual INCOME movements), minus cash paid out of the till during the shift
+  (manual EXPENSE movements, supplier payments, and cash refunds on returns).
+  The close records the variance (short/over). One open shift per user.
+- Returns recorded before refund methods existed have no method stored, so they
+  are not counted against expected cash.
+- The Cash Flow page shows the **shift history** with float, expected,
+  declared, and variance per shift.
+
+### Receivables And Analytics
+
+- The Analytics report and the Cash Flow page both show **receivables**:
+  outstanding credit, ageing buckets (0–30, 31–60, 61–90, and 90+ days), and
+  the largest debtors.
+- Analytics also gained a **by payment method** mix table, **returns refunded**
+  figures for the period, and the branch table described above.
+
+### Full-Field Product And Supplier Editing (Admin Only)
+
+- The Admin page has an **Edit products & suppliers** panel (admins only).
+  Pick a product and every column is editable: SKU, barcode, name, category,
+  brand, image paths, warehouse, branch, supplier, buying and selling prices,
+  VAT rate, reorder level, stock quantity, and supplied quantity. A stock
+  quantity change is recorded as an `ADJUSTMENT` movement with the note as the
+  reference, so the movement ledger stays truthful.
+- Suppliers can be edited the same way: name, phone, email, KRA PIN, and the
+  balance the business owes them. Customers get the same treatment: name,
+  phone, email, KRA PIN, and the **credit balance** they owe the business —
+  so admins can add credit to a customer or correct a balance without running
+  a Credit sale (a blank balance keeps the current value).
+- Every change is written to the audit log with the note attached. The six
+  backing API actions (`admin_product_detail`, `admin_update_product`,
+  `admin_supplier_detail`, `admin_update_supplier`, `admin_customer_detail`,
+  `admin_update_customer`) are gated to ADMIN and reject managers and
+  employees with 403.
+
+### Phase 6 Test Suite
+
+```powershell
+php -c .\php-runtime.ini tests\phase6_smoke.php
+php -c .\php-runtime.ini tests\admin_edit_smoke.php
+```
+
+Covers the cost snapshot and buying-price fallback, branch capture and the
+"Unassigned" bucket, credit remainder arithmetic, FIFO payment allocation with
+sale settlement, balance/cash-transaction effects, receivables ageing, return
+recording with restock and movement caps, purchase order create/receive/cancel
+with stock and price effects, supplier balance crediting on receipt (including
+the paid-upfront skip), supplier payments with cash expenses, the shared
+restock primitive behind receiving, shift open/close with expected cash
+(including cash in, cash out, and cash refunds) and variance, refund methods on
+returns, the payment-method allow-list,
+customer capture in checkout and the idempotency hash, API role gates, the
+business reset (children-first deletes under enforced foreign keys), and the
+analytics payload shape (96 checks). The admin
+editor suite covers the ADMIN-only gates, detail loading, full-column product
+edits with ADJUSTMENT movements, supplier and customer edits including the
+balances, validation failures, duplicate SKU handling, no-change saves, and
+audit entries (47 checks).
 
 ## Default Login
 

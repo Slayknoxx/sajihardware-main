@@ -13,6 +13,9 @@ declare(strict_types=1);
  * known money keys to major units at the HTTP boundary.
  */
 
+require_once __DIR__ . '/returns.php';
+require_once __DIR__ . '/credit.php';
+
 function analytics_timezone(): DateTimeZone
 {
     return new DateTimeZone(date_default_timezone_get() ?: 'UTC');
@@ -201,8 +204,8 @@ function analytics_profit_totals(array $bounds): array
 {
     $stmt = db()->prepare(
         "SELECT COALESCE(SUM(si.total),0) AS line_revenue,
-                COALESCE(SUM(CASE WHEN p.buying_price > 0 THEN si.total ELSE 0 END),0) AS costed_revenue,
-                COALESCE(SUM(si.quantity * p.buying_price),0) AS cost
+                COALESCE(SUM(CASE WHEN COALESCE(si.cost_price, p.buying_price) > 0 THEN si.total ELSE 0 END),0) AS costed_revenue,
+                COALESCE(SUM(si.quantity * COALESCE(si.cost_price, p.buying_price)),0) AS cost
          FROM sale_items si
          JOIN sales s ON s.id = si.sale_id
          JOIN products p ON p.id = si.product_id
@@ -364,22 +367,6 @@ function analytics_voids(array $bounds, int $limit = 5): array
     ];
 }
 
-function analytics_vat_breakdown(array $bounds): array
-{
-    $stmt = db()->prepare(
-        "SELECT vat_rate AS rate,
-                COUNT(*) AS invoices,
-                COALESCE(SUM(vat_amount),0) AS vat,
-                COALESCE(SUM(total),0) AS gross
-         FROM sales
-         WHERE status='COMPLETED' AND vat_amount > 0 AND created_at BETWEEN ? AND ?
-         GROUP BY vat_rate
-         ORDER BY vat DESC"
-    );
-    $stmt->execute([$bounds['start'], $bounds['end']]);
-    return $stmt->fetchAll();
-}
-
 function analytics_inventory(bool $canViewCost): array
 {
     $row = db()->query(
@@ -406,28 +393,87 @@ function analytics_inventory(bool $canViewCost): array
 
 function analytics_expenses(array $bounds): array
 {
+    // The Expenses form writes to the expenses table; the manual cash movement
+    // form writes EXPENSE rows to cash_transactions. Report both, grouped by
+    // category, so every expense in the period shows up here.
     $summary = db()->prepare(
         "SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total
-         FROM expenses
-         WHERE created_at BETWEEN ? AND ?"
+         FROM (
+             SELECT amount FROM expenses WHERE created_at BETWEEN ? AND ?
+             UNION ALL
+             SELECT amount FROM cash_transactions WHERE type = 'EXPENSE' AND created_at BETWEEN ? AND ?
+         )"
     );
-    $summary->execute([$bounds['start'], $bounds['end']]);
+    $summary->execute([$bounds['start'], $bounds['end'], $bounds['start'], $bounds['end']]);
     $totals = $summary->fetch() ?: ['count' => 0, 'total' => 0];
 
     $byCategory = db()->prepare(
-        "SELECT category AS name, COUNT(*) AS count, COALESCE(SUM(amount),0) AS total
-         FROM expenses
-         WHERE created_at BETWEEN ? AND ?
-         GROUP BY category
+        "SELECT name, COUNT(*) AS count, COALESCE(SUM(amount),0) AS total
+         FROM (
+             SELECT COALESCE(NULLIF(TRIM(category),''),'Uncategorised') AS name, amount
+             FROM expenses
+             WHERE created_at BETWEEN ? AND ?
+             UNION ALL
+             SELECT COALESCE(NULLIF(TRIM(category),''),'Uncategorised') AS name, amount
+             FROM cash_transactions
+             WHERE type = 'EXPENSE' AND created_at BETWEEN ? AND ?
+         )
+         GROUP BY name
          ORDER BY total DESC"
     );
-    $byCategory->execute([$bounds['start'], $bounds['end']]);
+    $byCategory->execute([$bounds['start'], $bounds['end'], $bounds['start'], $bounds['end']]);
+    $rows = $byCategory->fetchAll();
+
+    // Standard chart-of-accounts lines that saw no spend this period, so the
+    // report can still show every line is accounted for.
+    $used = array_column($rows, 'name');
+    $unused = array_values(array_filter(
+        EXPENSE_CATEGORIES,
+        static fn (string $category): bool => !in_array($category, $used, true)
+    ));
 
     return [
         'count' => (int)$totals['count'],
         'total' => (int)$totals['total'],
-        'by_category' => $byCategory->fetchAll(),
+        'by_category' => $rows,
+        'unused' => $unused,
+        'entries' => analytics_expense_entries($bounds),
     ];
+}
+
+/**
+ * Individual expense rows for the reporting period.
+ *
+ * The analytics table shows one line per entry so an admin can correct a
+ * category or amount without leaving the report. Cash movements and Expenses
+ * form entries share the shape the cash-flow editor already understands.
+ *
+ * @param array $bounds UTC start/end bounds from analytics_period().
+ * @return array<int, array<string, mixed>> Newest entry first.
+ */
+function analytics_expense_entries(array $bounds, int $limit = 200): array
+{
+    $limit = max(1, min(1000, $limit));
+    $stmt = db()->prepare(
+        "SELECT source, id, type, category, description, amount, reference, created_at
+         FROM (
+             SELECT 'expense' AS source, id, 'EXPENSE' AS type,
+                    COALESCE(NULLIF(TRIM(category),''),'Uncategorised') AS category,
+                    title AS description, amount, paid_by AS reference, created_at
+             FROM expenses
+             WHERE created_at BETWEEN ? AND ?
+             UNION ALL
+             SELECT 'cash_transaction' AS source, id, 'EXPENSE' AS type,
+                    COALESCE(NULLIF(TRIM(category),''),'Uncategorised') AS category,
+                    description, amount, reference, created_at
+             FROM cash_transactions
+             WHERE type = 'EXPENSE' AND created_at BETWEEN ? AND ?
+         )
+         ORDER BY created_at DESC, id DESC
+         LIMIT {$limit}"
+    );
+    $stmt->execute([$bounds['start'], $bounds['end'], $bounds['start'], $bounds['end']]);
+    return $stmt->fetchAll();
 }
 
 function analytics_sales_by(array $bounds, string $column, int $limit = 12): array
@@ -449,6 +495,65 @@ function analytics_sales_by(array $bounds, string $column, int $limit = 12): arr
     );
     $stmt->execute([$bounds['start'], $bounds['end']]);
     return $stmt->fetchAll();
+}
+
+/**
+ * Sales grouped by branch for the reporting period.
+ *
+ * Sales created before the branch capture shipped read as "Unassigned".
+ *
+ * @param array $bounds UTC start/end bounds from analytics_period().
+ * @return array<int, array<string, mixed>> One row per branch, newest revenue first.
+ */
+function analytics_branches(array $bounds): array
+{
+    $stmt = db()->prepare(
+        "SELECT COALESCE(b.name, 'Unassigned') AS branch,
+                COALESCE(SUM(s.total),0) AS revenue,
+                COUNT(*) AS transactions
+         FROM sales s
+         LEFT JOIN branches b ON b.id = s.branch_id
+         WHERE s.status='COMPLETED' AND s.created_at BETWEEN ? AND ?
+         GROUP BY b.name
+         ORDER BY revenue DESC"
+    );
+    $stmt->execute([$bounds['start'], $bounds['end']]);
+    $rows = $stmt->fetchAll() ?: [];
+    foreach ($rows as &$row) {
+        $row['branch'] = (string)$row['branch'];
+        $row['revenue'] = (int)$row['revenue'];
+        $row['transactions'] = (int)$row['transactions'];
+    }
+    unset($row);
+    return $rows;
+}
+
+/**
+ * Revenue split per payment method for the reporting period.
+ *
+ * @param array $bounds UTC start/end bounds from analytics_period().
+ * @return array<int, array<string, mixed>> One row per payment method.
+ */
+function analytics_payment_mix(array $bounds): array
+{
+    $stmt = db()->prepare(
+        "SELECT payment_method AS method,
+                COALESCE(SUM(total),0) AS revenue,
+                COUNT(*) AS transactions
+         FROM sales
+         WHERE status='COMPLETED' AND created_at BETWEEN ? AND ?
+         GROUP BY payment_method
+         ORDER BY revenue DESC"
+    );
+    $stmt->execute([$bounds['start'], $bounds['end']]);
+    $rows = $stmt->fetchAll() ?: [];
+    foreach ($rows as &$row) {
+        $row['method'] = (string)$row['method'];
+        $row['revenue'] = (int)$row['revenue'];
+        $row['transactions'] = (int)$row['transactions'];
+    }
+    unset($row);
+    return $rows;
 }
 
 function analytics_customers(array $bounds): array
@@ -667,7 +772,6 @@ function analytics_report(array $user, array $input): array
             'discounts' => (int)$sales['discounts'],
             'discount_pct' => $discountPct,
             'vat' => (int)$sales['vat'],
-            'vat_breakdown' => analytics_vat_breakdown($period['bounds']),
         ],
         'trend' => $trend,
         'hourly' => $period['key'] === 'today'
@@ -683,6 +787,10 @@ function analytics_report(array $user, array $input): array
         'categories' => analytics_sales_by($period['bounds'], 'category'),
         'brands' => analytics_sales_by($period['bounds'], 'brand'),
         'customers' => analytics_customers($period['bounds']),
+        'branches' => analytics_branches($period['bounds']),
+        'payment_mix' => analytics_payment_mix($period['bounds']),
+        'returns' => returns_totals($period['bounds']),
+        'receivables' => receivables_summary(),
         'compliance' => analytics_compliance($period['bounds']),
     ];
 }

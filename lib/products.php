@@ -258,3 +258,83 @@ function product_update(array $user, array $input): array
         throw $e;
     }
 }
+
+/**
+ * Delete a product that has no sales history.
+ *
+ * A product can only be removed while no sale, quotation, purchase order, or
+ * return refers to it. Those records keep a product_id, so deleting the row
+ * would leave them pointing at nothing and break receipts, conversions, and
+ * order receiving. Stock on hand is allowed to go with the product; the
+ * confirmation dialog names the units and the audit entry records them.
+ *
+ * @param array $user  Authenticated user (for the audit trail).
+ * @param array $input id.
+ * @return array Summary of the deletion.
+ */
+function product_delete(array $user, array $input): array
+{
+    $id = filter_var($input['id'] ?? null, FILTER_VALIDATE_INT);
+    if ($id === false || $id < 1) {
+        throw new InvalidArgumentException('Choose a valid product to delete.');
+    }
+
+    $pdo = db();
+    db_begin_immediate();
+    try {
+        $lookup = $pdo->prepare('SELECT id, sku, name, quantity FROM products WHERE id = ?');
+        $lookup->execute([$id]);
+        $product = $lookup->fetch();
+        if (!$product) {
+            throw new InvalidArgumentException('Product not found.');
+        }
+
+        // Documents and history that name this product. Stock movements are
+        // operational and go with the product; the documents do not.
+        $references = [
+            'sale line' => 'sale_items',
+            'quotation line' => 'quotation_items',
+            'purchase order line' => 'purchase_order_items',
+            'return' => 'returns',
+        ];
+        $found = [];
+        foreach ($references as $label => $table) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE product_id = ?");
+            $stmt->execute([$id]);
+            $count = (int)$stmt->fetchColumn();
+            if ($count > 0) {
+                $found[] = $count . ' ' . $label . ($count === 1 ? '' : 's');
+            }
+        }
+        if ($found !== []) {
+            throw new InvalidArgumentException(
+                $product['sku'] . ' is used on ' . implode(', ', $found) . ' and cannot be deleted.'
+            );
+        }
+
+        $pdo->prepare('DELETE FROM stock_movements WHERE product_id = ?')->execute([$id]);
+        $pdo->prepare('DELETE FROM products WHERE id = ?')->execute([$id]);
+
+        $details = $product['sku'] . ': ' . $product['name'];
+        $quantity = (int)$product['quantity'];
+        if ($quantity > 0) {
+            $details .= ' | ' . $quantity . ' unit(s) in stock discarded';
+        }
+        audit((string)($user['username'] ?? 'system'), 'DELETE_PRODUCT', $details);
+
+        db_commit();
+
+        return [
+            'ok' => true,
+            'id' => $id,
+            'sku' => (string)$product['sku'],
+            'name' => (string)$product['name'],
+            'quantity' => $quantity,
+        ];
+    } catch (Throwable $e) {
+        if (db_in_transaction()) {
+            db_rollback();
+        }
+        throw $e;
+    }
+}

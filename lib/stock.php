@@ -4,14 +4,61 @@ declare(strict_types=1);
 /**
  * Stock control helpers.
  *
- * Restocking is the only supported way to increase the quantity of an existing
- * product. It updates live stock, the supplied-quantity counter used by Stock
- * Analytics, and writes a movement row so every change is traceable.
+ * Manual restocking and purchase-order receiving share one primitive,
+ * stock_add_units(), so both increase live stock, the supplied-quantity
+ * counter used by Stock Analytics, and the movement history the same way.
  */
 
 function stock_can_restock(string $role): bool
 {
     return in_array($role, ['ADMIN', 'MANAGER'], true);
+}
+
+/**
+ * Add units to a product inside the caller's transaction.
+ *
+ * Updates live stock, the supplied-quantity counter, and optionally the
+ * buying price, then writes a RESTOCK movement. The caller owns the
+ * transaction and the audit entry, so each entry point keeps its own audit
+ * action while the stock maths stays in one place.
+ *
+ * @param int      $productId   Product to top up.
+ * @param int      $quantity    Units to add (validated by the caller).
+ * @param string   $reference   Where the units came from (GRN, PO number, ...).
+ * @param int|null $buyingPrice New buying price in minor units, or null to keep it.
+ * @param int|null $userId      Acting user for the movement row.
+ * @return array Product snapshot before and after the change.
+ */
+function stock_add_units(int $productId, int $quantity, string $reference, ?int $buyingPrice, ?int $userId): array
+{
+    $stmt = db()->prepare('SELECT id, sku, name, quantity FROM products WHERE id = ?');
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch();
+    if (!$product) {
+        throw new InvalidArgumentException('Product not found.');
+    }
+
+    $previousQuantity = (int)$product['quantity'];
+    if ($buyingPrice !== null) {
+        db()->prepare('UPDATE products SET quantity = quantity + ?, supplied_quantity = supplied_quantity + ?, buying_price = ? WHERE id = ?')
+            ->execute([$quantity, $quantity, $buyingPrice, $productId]);
+    } else {
+        db()->prepare('UPDATE products SET quantity = quantity + ?, supplied_quantity = supplied_quantity + ? WHERE id = ?')
+            ->execute([$quantity, $quantity, $productId]);
+    }
+
+    db()->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
+        ->execute([$productId, $quantity, 'RESTOCK', $reference, $userId]);
+
+    return [
+        'product_id' => (int)$product['id'],
+        'sku' => (string)$product['sku'],
+        'name' => (string)$product['name'],
+        'previous_quantity' => $previousQuantity,
+        'quantity_added' => $quantity,
+        'new_quantity' => $previousQuantity + $quantity,
+        'reference' => $reference,
+    ];
 }
 
 /**
@@ -50,43 +97,23 @@ function stock_restock(array $user, array $input): array
 
     db_begin_immediate();
     try {
-        $stmt = db()->prepare('SELECT id, sku, name, quantity FROM products WHERE id = ?');
-        $stmt->execute([$productId]);
-        $product = $stmt->fetch();
-        if (!$product) {
-            throw new InvalidArgumentException('Product not found.');
-        }
-
-        $previousQuantity = (int)$product['quantity'];
-        if ($buyingPrice !== null) {
-            db()->prepare('UPDATE products SET quantity = quantity + ?, supplied_quantity = supplied_quantity + ?, buying_price = ? WHERE id = ?')
-                ->execute([$quantity, $quantity, $buyingPrice, $productId]);
-        } else {
-            db()->prepare('UPDATE products SET quantity = quantity + ?, supplied_quantity = supplied_quantity + ? WHERE id = ?')
-                ->execute([$quantity, $quantity, $productId]);
-        }
-
-        db()->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
-            ->execute([$productId, $quantity, 'RESTOCK', $reference, (int)($user['id'] ?? 0) ?: null]);
+        $movement = stock_add_units(
+            $productId,
+            $quantity,
+            $reference,
+            $buyingPrice,
+            (int)($user['id'] ?? 0) ?: null
+        );
 
         audit(
             (string)($user['username'] ?? 'system'),
             'RESTOCK_PRODUCT',
-            $product['sku'] . ' +' . $quantity . ($reference !== '' ? ' ref ' . $reference : '')
+            $movement['sku'] . ' +' . $quantity . ($reference !== '' ? ' ref ' . $reference : '')
         );
 
         db_commit();
 
-        return [
-            'ok' => true,
-            'product_id' => (int)$product['id'],
-            'sku' => (string)$product['sku'],
-            'name' => (string)$product['name'],
-            'previous_quantity' => $previousQuantity,
-            'quantity_added' => $quantity,
-            'new_quantity' => $previousQuantity + $quantity,
-            'reference' => $reference,
-        ];
+        return ['ok' => true] + $movement;
     } catch (Throwable $e) {
         if (db_in_transaction()) {
             db_rollback();

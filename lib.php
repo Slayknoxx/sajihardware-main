@@ -569,6 +569,13 @@ function money_json_format(mixed $value, ?string $key = null): mixed
         'cash_revenue' => true, 'mpesa_revenue' => true, 'pending_amount' => true,
         'failed_amount' => true, 'void_value' => true, 'at_cost' => true,
         'at_retail' => true, 'potential_margin' => true, 'profit' => true,
+        'cost_price' => true, 'unit_cost' => true, 'cash_expected' => true,
+        'variance' => true, 'outstanding' => true, 'returns_amount' => true,
+        'cash_in' => true, 'cash_out' => true, 'cash_refunds' => true,
+        'net_revenue' => true, 'other_revenue' => true, 'cost' => true,
+        'line_revenue' => true, 'costed_revenue' => true,
+        'current' => true, '31_60' => true, '61_90' => true, 'over_90' => true,
+        'supplier_balance' => true,
     ];
     if ($key !== null && isset($moneyFields[$key]) && is_numeric($value)) {
         return money_minor_to_major($value);
@@ -823,6 +830,7 @@ function init_db(): void
             reason TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'PENDING',
             created_by INTEGER NOT NULL,
+            refund_method TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS expenses (
@@ -999,6 +1007,7 @@ function init_db(): void
         'kra_pin' => 'TEXT NOT NULL DEFAULT ""',
         'invoice_type' => 'TEXT NOT NULL DEFAULT "NORMAL"',
         'quotation_id' => 'INTEGER',
+        'branch_id' => 'INTEGER',
     ]);
     ensure_table_columns('products', [
         'supplier_id' => 'INTEGER',
@@ -1009,6 +1018,65 @@ function init_db(): void
         'converted_sale_id' => 'INTEGER',
         'customer_kra_pin' => 'TEXT NOT NULL DEFAULT ""',
     ]);
+    ensure_table_columns('sale_items', [
+        'cost_price' => 'INTEGER',
+    ]);
+    ensure_table_columns('returns', [
+        'sale_id' => 'INTEGER',
+        'sale_item_id' => 'INTEGER',
+        'product_id' => 'INTEGER',
+        'quantity' => 'INTEGER NOT NULL DEFAULT 0',
+        'unit_price' => 'INTEGER NOT NULL DEFAULT 0',
+        'refund_method' => 'TEXT NOT NULL DEFAULT ""',
+    ]);
+    ensure_table_columns('purchase_orders', [
+        'created_by' => 'INTEGER',
+        'expected_at' => 'TEXT',
+        'received_at' => 'TEXT',
+        'notes' => 'TEXT NOT NULL DEFAULT ""',
+    ]);
+    ensure_table_columns('cash_shifts', [
+        'closed_by' => 'INTEGER',
+        'cash_expected' => 'INTEGER',
+        'variance' => 'INTEGER',
+    ]);
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS purchase_order_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            product_name TEXT NOT NULL DEFAULT '',
+            quantity INTEGER NOT NULL,
+            received_quantity INTEGER NOT NULL DEFAULT 0,
+            unit_cost INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(purchase_order_id) REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        );
+        CREATE TABLE IF NOT EXISTS customer_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            method TEXT NOT NULL DEFAULT 'Cash',
+            reference TEXT NOT NULL DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(customer_id) REFERENCES customers(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS supplier_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            method TEXT NOT NULL DEFAULT 'Cash',
+            reference TEXT NOT NULL DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(supplier_id) REFERENCES suppliers(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+    ");
 
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_payment_reference ON sales(payment_reference) WHERE payment_reference != ""');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_mpesa_request_id ON sales(mpesa_request_id)');
@@ -1019,6 +1087,14 @@ function init_db(): void
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements(product_id)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_stock_movements_created_at ON stock_movements(created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id ON sale_items(sale_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_returns_created_at ON returns(created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sales_branch_id ON sales(branch_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po ON purchase_order_items(purchase_order_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_customer_payments_customer ON customer_payments(customer_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_customer_payments_created_at ON customer_payments(created_at)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_supplier_payments_supplier ON supplier_payments(supplier_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_supplier_payments_created_at ON supplier_payments(created_at)');
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_provider_reference ON payment_events(provider_reference) WHERE provider_reference != ""');
     $pdo->exec('UPDATE products SET supplied_quantity = quantity + COALESCE((SELECT SUM(quantity) FROM sale_items WHERE sale_items.product_id = products.id), 0) WHERE supplied_quantity = 0');
 

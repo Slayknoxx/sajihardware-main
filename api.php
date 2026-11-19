@@ -13,6 +13,12 @@ require_once __DIR__ . '/lib/quotations.php';
 require_once __DIR__ . '/lib/cashflow.php';
 require_once __DIR__ . '/lib/staff.php';
 require_once __DIR__ . '/lib/exports.php';
+require_once __DIR__ . '/lib/admin.php';
+require_once __DIR__ . '/lib/credit.php';
+require_once __DIR__ . '/lib/returns.php';
+require_once __DIR__ . '/lib/purchases.php';
+require_once __DIR__ . '/lib/shifts.php';
+require_once __DIR__ . '/lib/reset.php';
 
 $action = $_GET['action'] ?? '';
 $timeoutMinutes = 30;
@@ -261,7 +267,7 @@ try {
 
     if ($action === 'list') {
         $table = $_GET['table'] ?? '';
-        $allowed = ['products','customers','suppliers','employees','branches','held_sales','returns','expenses','cash_transactions','quotations','purchase_orders','sync_queue','audit_logs','users','sales','sale_items'];
+        $allowed = ['products','customers','suppliers','employees','branches','held_sales','returns','expenses','cash_transactions','quotations','purchase_orders','purchase_order_items','customer_payments','supplier_payments','sync_queue','audit_logs','users','sales','sale_items'];
         if (!in_array($table, $allowed, true)) {
             json_response(['error' => 'Unsupported table'], 400);
         }
@@ -285,6 +291,9 @@ try {
                 ? "SELECT * FROM sales WHERE status='COMPLETED' ORDER BY id DESC LIMIT 300"
                 : 'SELECT * FROM sale_items ORDER BY id DESC LIMIT 300';
             $rows = db()->query($query)->fetchAll();
+        } elseif ($table === 'returns') {
+            require_role(['ADMIN', 'MANAGER']);
+            $rows = db()->query('SELECT r.*, p.name AS product_name, p.sku AS product_sku FROM returns r LEFT JOIN products p ON p.id = r.product_id ORDER BY r.id DESC LIMIT 300')->fetchAll();
         } elseif ($table === 'quotations') {
             $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.customer_kra_pin, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
         } else {
@@ -294,6 +303,156 @@ try {
             $rows = db()->query("SELECT * FROM {$table} ORDER BY id DESC LIMIT 300")->fetchAll();
         }
         json_response(['rows' => $rows]);
+    }
+
+    if ($action === 'customer_options') {
+        // Lightweight customer picker for the checkout form; every signed-in
+        // role needs it, so it only exposes id/name/phone.
+        $rows = db()->query('SELECT id, name, phone FROM customers ORDER BY name LIMIT 500')->fetchAll();
+        json_response(['rows' => $rows]);
+    }
+
+    if ($action === 'create_customer_payment') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = customer_payment_record($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'create_supplier_payment') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = supplier_payment_record($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'create_return') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = return_record($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'create_purchase_order') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = purchase_order_create($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'receive_purchase_order') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = purchase_order_receive($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'cancel_purchase_order') {
+        $user = require_role(['ADMIN','MANAGER']);
+        $d = input_json();
+        try {
+            $result = purchase_order_cancel($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'po_detail') {
+        require_role(['ADMIN','MANAGER']);
+        $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($id === false || $id < 1) {
+            json_response(['error' => 'Choose a purchase order'], 400);
+        }
+        $order = purchase_order_detail($id);
+        if (!$order) {
+            json_response(['error' => 'Purchase order not found'], 404);
+        }
+        json_response(['order' => $order]);
+    }
+
+    if ($action === 'receivables') {
+        require_role(['ADMIN','MANAGER']);
+        json_response(receivables_summary());
+    }
+
+    if ($action === 'sale_lookup') {
+        // Receipt lookup for the returns panel: sale header plus lines with
+        // how many units have already been returned per line.
+        require_role(['ADMIN','MANAGER']);
+        $receipt = trim((string)($_GET['receipt'] ?? ''));
+        if ($receipt === '') {
+            json_response(['error' => 'Enter a receipt number'], 400);
+        }
+        $stmt = db()->prepare("SELECT * FROM sales WHERE receipt_no = ? AND status = 'COMPLETED'");
+        $stmt->execute([$receipt]);
+        $sale = $stmt->fetch();
+        if (!$sale) {
+            json_response(['error' => 'No completed sale found for that receipt'], 404);
+        }
+        $items = db()->prepare(
+            'SELECT si.id, si.product_id, si.product_name, si.quantity, si.unit_price, si.total,
+                    COALESCE((SELECT SUM(r.quantity) FROM returns r WHERE r.sale_item_id = si.id),0) AS returned_quantity
+             FROM sale_items si
+             WHERE si.sale_id = ?
+             ORDER BY si.id'
+        );
+        $items->execute([(int)$sale['id']]);
+        $sale['items'] = $items->fetchAll();
+        json_response(['sale' => $sale]);
+    }
+
+    if ($action === 'shift_open') {
+        $user = require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        $d = input_json();
+        try {
+            $result = shift_open($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'shift_close') {
+        $user = require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        $d = input_json();
+        try {
+            $result = shift_close($user, is_array($d) ? $d : []);
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'shift_current') {
+        $user = require_role(['ADMIN','MANAGER','EMPLOYEE']);
+        json_response(['shift' => shift_current($user)]);
+    }
+
+    if ($action === 'shift_history') {
+        require_role(['ADMIN','MANAGER']);
+        $limit = max(1, min(100, (int)($_GET['limit'] ?? 20)));
+        json_response(['rows' => shift_history($limit)]);
     }
 
     if ($action === 'update_person') {
@@ -362,15 +521,7 @@ try {
         if (($d['confirmation'] ?? '') !== 'RESET BUSINESS DATA') {
             json_response(['error' => 'Type RESET BUSINESS DATA to confirm'], 400);
         }
-        $pdo = db();
-        $pdo->beginTransaction();
-        foreach (['payment_events','payments','checkout_requests','sync_queue','quotation_items','quotations','sale_items','sales','stock_movements','held_sales','returns','cash_transactions','expenses','purchase_orders','products','customers','suppliers','employees','branches','cash_shifts'] as $table) {
-            $pdo->exec('DELETE FROM ' . $table);
-        }
-        $pdo->prepare('INSERT INTO branches(name, location, phone) VALUES(?,?,?)')->execute(['Main', COMPANY_LOCATION, '']);
-        $pdo->prepare('INSERT INTO customers(name, phone, email) VALUES(?,?,?)')->execute(['Walk-in Customer', '', COMPANY_EMAIL]);
-        audit($user['username'], 'RESET_BUSINESS_DATA', 'Business data reset; user accounts preserved');
-        $pdo->commit();
+        business_data_reset($user);
         json_response(['ok' => true]);
     }
 
@@ -493,8 +644,8 @@ try {
         $d = input_json();
         $quotationId = (int)($d['id'] ?? 0);
         $paymentMethod = trim((string)($d['payment_method'] ?? 'Cash')) ?: 'Cash';
-        if ($paymentMethod !== 'Cash') {
-            json_response(['error' => 'Quotation conversion currently supports cash payment only'], 400);
+        if (!in_array($paymentMethod, PAYMENT_METHODS, true) || $paymentMethod === 'M-Pesa') {
+            json_response(['error' => 'Choose a supported payment method for the conversion'], 400);
         }
         $amountPaid = money_to_minor($d['amount_paid'] ?? 0);
         $pdo = db();
@@ -526,10 +677,21 @@ try {
                 json_response(['error' => 'Quotation has no items'], 400);
             }
             $totalCents = (int)$quote['total'];
-            $amountPaid = $amountPaid > 0 ? $amountPaid : $totalCents;
-            if ($amountPaid < $totalCents) {
+            if ($paymentMethod === 'Cash') {
+                $amountPaid = $amountPaid > 0 ? $amountPaid : $totalCents;
+                if ($amountPaid < $totalCents) {
+                    db_rollback();
+                    json_response(['error' => 'Amount paid cannot be less than the quotation total'], 400);
+                }
+            } elseif ($paymentMethod === 'Credit') {
+                $amountPaid = max(0, min($amountPaid, $totalCents));
+            } else {
+                $amountPaid = $totalCents;
+            }
+            $creditCents = $paymentMethod === 'Credit' ? $totalCents - $amountPaid : 0;
+            if ($creditCents > 0 && $quote['customer_id'] === null) {
                 db_rollback();
-                json_response(['error' => 'Amount paid cannot be less than the quotation total'], 400);
+                json_response(['error' => 'Credit conversions require a saved customer'], 400);
             }
             foreach ($items as $item) {
                 $stock = $pdo->prepare('UPDATE products SET quantity=quantity-? WHERE id=? AND quantity>=?');
@@ -540,13 +702,27 @@ try {
                 }
             }
             $receipt = receipt_no();
-            $changeDue = $amountPaid - $totalCents;
+            $changeDue = $paymentMethod === 'Cash' ? $amountPaid - $totalCents : 0;
             $effectiveVatRate = $totalCents > (int)$quote['tax'] ? (int)$quote['tax'] / ($totalCents - (int)$quote['tax']) : 0.0;
-            $pdo->prepare('INSERT INTO sales(receipt_no, customer_id, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, etims_status, cashier_name, created_by, quotation_id, paid_at, vat_amount, vat_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                ->execute([$receipt, $quote['customer_id'], $quote['customer_name'], $paymentMethod, $quote['subtotal'], $quote['tax'], $quote['discount'], $totalCents, $amountPaid, $changeDue, 'COMPLETED', 'PENDING', $user['full_name'] ?: $user['username'], $user['id'], $quotationId, date('Y-m-d H:i:s'), $quote['tax'], $effectiveVatRate]);
+            $branchId = null;
+            $branchStmt = $pdo->prepare('SELECT id FROM branches WHERE name = ?');
+            $branchStmt->execute([(string)($user['branch'] ?? '')]);
+            $foundBranch = $branchStmt->fetchColumn();
+            if ($foundBranch !== false) {
+                $branchId = (int)$foundBranch;
+            }
+            $pdo->prepare('INSERT INTO sales(receipt_no, customer_id, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, etims_status, cashier_name, created_by, quotation_id, paid_at, vat_amount, vat_rate, branch_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                ->execute([$receipt, $quote['customer_id'], $quote['customer_name'], $paymentMethod, $quote['subtotal'], $quote['tax'], $quote['discount'], $totalCents, $amountPaid, $changeDue, 'COMPLETED', 'PENDING', $user['full_name'] ?: $user['username'], $user['id'], $quotationId, date('Y-m-d H:i:s'), $quote['tax'], $effectiveVatRate, $branchId]);
             $saleId = (int)$pdo->lastInsertId();
+            if ($creditCents > 0) {
+                $pdo->prepare('UPDATE customers SET balance = balance + ? WHERE id = ?')
+                    ->execute([$creditCents, (int)$quote['customer_id']]);
+            }
             foreach ($items as $item) {
-                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')->execute([$saleId, $item['product_id'], $item['product_name'], $item['quantity'], $item['unit_price'], $item['total']]);
+                $productCost = $pdo->prepare('SELECT buying_price FROM products WHERE id = ?');
+                $productCost->execute([(int)$item['product_id']]);
+                $costPrice = $productCost->fetchColumn();
+                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total, cost_price) VALUES(?,?,?,?,?,?,?)')->execute([$saleId, $item['product_id'], $item['product_name'], $item['quantity'], $item['unit_price'], $item['total'], $costPrice !== false ? (int)$costPrice : null]);
                 $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')->execute([(int)$item['product_id'], -(int)$item['quantity'], 'SALE', $receipt, (int)$user['id']]);
             }
             $pdo->prepare('INSERT INTO sync_queue(entity, entity_id, action) VALUES(?,?,?)')->execute(['sale', $saleId, 'UPLOAD']);
@@ -586,6 +762,85 @@ try {
     if ($action === 'update_product') {
         $user = require_role(['ADMIN','MANAGER']);
         json_response(product_update($user, input_json()));
+    }
+
+    if ($action === 'delete_product') {
+        $user = require_role(['ADMIN','MANAGER']);
+        try {
+            $result = product_delete($user, input_json());
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'admin_product_detail') {
+        require_role(['ADMIN']);
+        $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($id === false || $id < 1) {
+            json_response(['error' => 'Choose a product to load'], 400);
+        }
+        $product = admin_product_detail($id);
+        if (!$product) {
+            json_response(['error' => 'Product not found'], 404);
+        }
+        json_response(['product' => $product]);
+    }
+
+    if ($action === 'admin_update_product') {
+        $user = require_role(['ADMIN']);
+        try {
+            $result = admin_product_update($user, input_json());
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'admin_supplier_detail') {
+        require_role(['ADMIN']);
+        $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($id === false || $id < 1) {
+            json_response(['error' => 'Choose a supplier to load'], 400);
+        }
+        $supplier = admin_supplier_detail($id);
+        if (!$supplier) {
+            json_response(['error' => 'Supplier not found'], 404);
+        }
+        json_response(['supplier' => $supplier]);
+    }
+
+    if ($action === 'admin_update_supplier') {
+        $user = require_role(['ADMIN']);
+        try {
+            $result = admin_supplier_update($user, input_json());
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
+    }
+
+    if ($action === 'admin_customer_detail') {
+        require_role(['ADMIN']);
+        $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($id === false || $id < 1) {
+            json_response(['error' => 'Choose a customer to load'], 400);
+        }
+        $customer = admin_customer_detail($id);
+        if (!$customer) {
+            json_response(['error' => 'Customer not found'], 404);
+        }
+        json_response(['customer' => $customer]);
+    }
+
+    if ($action === 'admin_update_customer') {
+        $user = require_role(['ADMIN']);
+        try {
+            $result = admin_customer_update($user, input_json());
+        } catch (InvalidArgumentException $e) {
+            json_response(['error' => $e->getMessage()], 400);
+        }
+        json_response($result);
     }
 
     if ($action === 'restock_product') {
@@ -754,7 +1009,7 @@ try {
             json_response(['error' => 'A valid checkout idempotency key is required'], 400);
         }
         $paymentMethod = trim((string)($d['payment_method'] ?? ''));
-        if (!in_array($paymentMethod, ['Cash', 'M-Pesa'], true)) {
+        if (!in_array($paymentMethod, PAYMENT_METHODS, true)) {
             json_response(['error' => 'Select a supported payment method'], 400);
         }
         $cart = [];
@@ -782,6 +1037,15 @@ try {
         if (strlen($customerName) > 120) {
             json_response(['error' => 'Customer name is too long'], 400);
         }
+        $customerId = ($d['customer_id'] ?? '') === '' || $d['customer_id'] === null
+            ? null
+            : filter_var($d['customer_id'], FILTER_VALIDATE_INT);
+        if ($customerId !== null && ($customerId === false || $customerId < 1)) {
+            json_response(['error' => 'Choose a valid customer'], 400);
+        }
+        if ($paymentMethod === 'Credit' && $customerId === null) {
+            json_response(['error' => 'Credit sales require a saved customer'], 400);
+        }
         $mpesaPhone = $paymentMethod === 'M-Pesa' ? normalize_phone((string)($d['mpesa_phone'] ?? '')) : '';
         if ($paymentMethod === 'M-Pesa' && !preg_match('/^254\d{9,10}$/', $mpesaPhone)) {
             json_response(['error' => 'Enter a valid 254-format mobile number.'], 400);
@@ -793,6 +1057,7 @@ try {
             'discount' => $discountCents,
             'amount_paid' => $amountPaidInput,
             'customer_name' => $customerName,
+            'customer_id' => $customerId,
             'mpesa_phone' => $mpesaPhone,
         ], JSON_THROW_ON_ERROR));
         $pdo = db();
@@ -830,7 +1095,7 @@ try {
             $lines = [];
             $subtotalCents = 0;
             foreach ($cart as $productId => $quantity) {
-                $stmt = $pdo->prepare('SELECT id, name, selling_price, vat_rate FROM products WHERE id = ?');
+                $stmt = $pdo->prepare('SELECT id, name, selling_price, buying_price, vat_rate FROM products WHERE id = ?');
                 $stmt->execute([$productId]);
                 $product = $stmt->fetch();
                 if (!$product) {
@@ -878,8 +1143,34 @@ try {
                     db_rollback();
                     json_response(['error' => 'Amount paid cannot be less than the sale total'], 400);
                 }
+            } elseif ($paymentMethod === 'Credit') {
+                $amountPaidCents = max(0, min($amountPaidInput, $totalCents));
+            } else {
+                $amountPaidCents = $totalCents;
             }
             $changeCents = $paymentMethod === 'Cash' ? $amountPaidCents - $totalCents : 0;
+            $creditCents = $paymentMethod === 'Credit' ? $totalCents - $amountPaidCents : 0;
+
+            $customer = null;
+            if ($customerId !== null) {
+                $customerStmt = $pdo->prepare('SELECT id, name, balance FROM customers WHERE id = ?');
+                $customerStmt->execute([$customerId]);
+                $customer = $customerStmt->fetch();
+                if (!$customer) {
+                    db_rollback();
+                    json_response(['error' => 'Customer not found'], 404);
+                }
+                $customerName = (string)$customer['name'];
+            }
+
+            $branchId = null;
+            $branchStmt = $pdo->prepare('SELECT id FROM branches WHERE name = ?');
+            $branchStmt->execute([(string)($user['branch'] ?? '')]);
+            $foundBranch = $branchStmt->fetchColumn();
+            if ($foundBranch !== false) {
+                $branchId = (int)$foundBranch;
+            }
+
             $receipt = receipt_no();
             $paymentReference = $paymentMethod === 'M-Pesa' ? payment_reference() : $receipt;
             $saleStatus = $paymentMethod === 'M-Pesa' ? 'PENDING_PAYMENT' : 'COMPLETED';
@@ -896,14 +1187,18 @@ try {
                 'tax' => money_minor_to_major($taxCents),
             ]);
 
-            $pdo->prepare('INSERT INTO sales(receipt_no, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, cashier_name, mpesa_phone, payment_reference, created_by, mpesa_status, paid_at, vat_amount, vat_rate, etims_status, etims_unique_id, etims_transaction_id, kra_pin, invoice_type, etims_qr_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                ->execute([$receipt, $customerName, $paymentMethod, $subtotalCents, $taxCents, $discountCents, $totalCents, $amountPaidCents, $changeCents, $saleStatus, $user['full_name'] ?: $user['username'], $mpesaPhone, $paymentReference, $user['id'], $paymentMethod === 'M-Pesa' ? 'PENDING' : 'NOT_SENT', $paymentMethod === 'M-Pesa' ? null : date('Y-m-d H:i:s'), $taxCents, $effectiveVatRate, $etimsStatus, $etimsUniqueId, $etimsTransactionId, KRA_PIN, 'NORMAL', $qrCodeData]);
+            $pdo->prepare('INSERT INTO sales(receipt_no, customer_id, customer_name, payment_method, subtotal, tax, discount, total, amount_paid, change_due, status, cashier_name, mpesa_phone, payment_reference, created_by, mpesa_status, paid_at, vat_amount, vat_rate, etims_status, etims_unique_id, etims_transaction_id, kra_pin, invoice_type, etims_qr_code, branch_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                ->execute([$receipt, $customerId, $customerName, $paymentMethod, $subtotalCents, $taxCents, $discountCents, $totalCents, $amountPaidCents, $changeCents, $saleStatus, $user['full_name'] ?: $user['username'], $mpesaPhone, $paymentReference, $user['id'], $paymentMethod === 'M-Pesa' ? 'PENDING' : 'NOT_SENT', $paymentMethod === 'M-Pesa' ? null : date('Y-m-d H:i:s'), $taxCents, $effectiveVatRate, $etimsStatus, $etimsUniqueId, $etimsTransactionId, KRA_PIN, 'NORMAL', $qrCodeData, $branchId]);
             $saleId = (int)$pdo->lastInsertId();
+            if ($creditCents > 0 && $customer !== null) {
+                $pdo->prepare('UPDATE customers SET balance = balance + ? WHERE id = ?')
+                    ->execute([$creditCents, $customerId]);
+            }
             foreach ($lines as $line) {
                 $product = $line['product'];
                 $quantity = $line['quantity'];
-                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
-                    ->execute([$saleId, (int)$product['id'], $product['name'], $quantity, $line['unit_cents'], $line['line_cents']]);
+                $pdo->prepare('INSERT INTO sale_items(sale_id, product_id, product_name, quantity, unit_price, total, cost_price) VALUES(?,?,?,?,?,?,?)')
+                    ->execute([$saleId, (int)$product['id'], $product['name'], $quantity, $line['unit_cents'], $line['line_cents'], (int)$product['buying_price']]);
                 $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
                     ->execute([(int)$product['id'], -$quantity, 'SALE', $receipt, (int)$user['id']]);
             }

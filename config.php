@@ -62,11 +62,49 @@ if (!function_exists('env_int')) {
 }
 
 define('APP_NAME', 'SAJI HARDWARE POS');
-define('APP_VERSION', '1.1.0');
+define('APP_VERSION', '1.2.0');
 define('COMPANY_NAME', 'SAJI HARDWARE LTD');
 define('COMPANY_EMAIL', 'sajihardwareltd@gmail.com');
 define('COMPANY_LOCATION', 'Kanduyi - Webuye Road');
 define('VAT_RATE', 0.16);
+
+/**
+ * Checkout payment methods. Cash keeps its change logic, M-Pesa runs the STK
+ * flow, Credit tracks an outstanding balance on the customer account, and the
+ * remaining methods are recorded as fully paid direct payments.
+ */
+define('PAYMENT_METHODS', ['Cash', 'M-Pesa', 'Card', 'Bank', 'Mobile Money', 'Voucher', 'Credit']);
+
+// How a refund is paid back. "None" covers exchanges and goodwill returns where
+// no money changes hands. Credit is excluded: a credit sale never took cash in.
+define('REFUND_METHODS', ['Cash', 'M-Pesa', 'Card', 'Bank', 'Mobile Money', 'Voucher', 'None']);
+
+// Chart of accounts for spending. Expense entries pick from this list so the
+// analytics expense table groups by consistent names.
+define('EXPENSE_CATEGORIES', [
+    'Stock Purchase',
+    'Freight & Clearing',
+    'Rent & Rates',
+    'Utilities',
+    'Salaries & Wages',
+    'Statutory & Payroll Taxes',
+    'Staff Welfare',
+    'Marketing & Advertising',
+    'Transport & Fuel',
+    'Vehicle & Equipment Upkeep',
+    'Professional Fees',
+    'Bank & Transaction Charges',
+    'Licences & Compliance',
+    'Packaging & Consumables',
+    'Repairs & Maintenance',
+    'Security',
+    'Insurance',
+    'Stock Loss & Shrinkage',
+    'Bad Debts',
+    'Interest & Loan Fees',
+    'Taxes & Penalties',
+    'Sundry / Other',
+]);
 
 define('BASE_PATH', __DIR__);
 // These overrides exist so tests can run against an isolated copy of the data.

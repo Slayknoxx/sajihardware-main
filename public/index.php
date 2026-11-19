@@ -70,12 +70,17 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                     <h2>Cart</h2>
                     <div id="cartLines" class="cart-lines"></div>
                     <div class="checkout-form">
+                        <select id="customerSelect" aria-label="Saved customer">
+                            <option value="" selected>Walk-in Customer</option>
+                        </select>
                         <input id="customerName" placeholder="Customer name">
                         <select id="paymentMethod">
                             <option value="" selected>Select payment method</option>
-                            <option>Cash</option>
-                            <option>M-Pesa</option>
+                            <?php foreach (PAYMENT_METHODS as $sajiMethod): ?>
+                            <option><?= htmlspecialchars($sajiMethod, ENT_QUOTES, 'UTF-8') ?></option>
+                            <?php endforeach; ?>
                         </select>
+                        <p id="creditHint" class="muted hidden">Amount paid below the total records the remainder as credit on the customer account.</p>
                         <div class="mpesa-input-wrap hidden" id="mpesaPhoneWrap" style="display:flex; align-items:center; gap:8px; margin-top:8px;">
                             <span style="font-weight:700; color:#0f172a;">254</span>
                             <input id="mpesaPhone" style="flex:1;" placeholder="712345678" inputmode="numeric" maxlength="9">
@@ -98,6 +103,47 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
             <section class="panel held-sales-panel" id="recentSalesPanel">
                 <h2>Recent sales</h2>
                 <div id="salesHistoryTable" class="table-wrap"></div>
+            </section>
+            <section class="panel held-sales-panel" id="returnsPanel">
+                <div class="section-heading">
+                    <div>
+                        <h2>Returns</h2>
+                        <span class="muted">Restock returned units and record the refund</span>
+                    </div>
+                </div>
+                <div class="toolbar">
+                    <input id="returnReceipt" class="search" placeholder="Receipt number">
+                    <button id="returnLookup" class="secondary" type="button">Load receipt</button>
+                </div>
+                <div id="returnSaleItems" class="table-wrap"></div>
+                <div class="toolbar hidden" id="returnSubmitRow">
+                    <input id="returnReason" maxlength="200" placeholder="Reason for the return">
+                    <select id="returnRefundMethod" title="How the refund is paid back">
+                        <?php foreach (REFUND_METHODS as $sajiRefund): ?>
+                        <option><?= htmlspecialchars($sajiRefund, ENT_QUOTES, 'UTF-8') ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button id="returnSubmit" class="primary" type="button">Record return</button>
+                </div>
+                <h3>Recent returns</h3>
+                <div id="returnsTable" class="table-wrap"></div>
+            </section>
+            <section class="panel held-sales-panel" id="cashShiftPanel">
+                <div class="section-heading">
+                    <div>
+                        <h2>Cash shift</h2>
+                        <span class="muted">Reconcile the till at opening and close</span>
+                    </div>
+                </div>
+                <div id="shiftCurrent"></div>
+                <div class="toolbar" id="shiftOpenForm">
+                    <input id="shiftOpeningFloat" type="number" min="0" step="0.01" placeholder="Opening float">
+                    <button id="shiftOpenBtn" class="primary" type="button">Open shift</button>
+                </div>
+                <div class="toolbar hidden" id="shiftCloseForm">
+                    <input id="shiftCashDeclared" type="number" min="0" step="0.01" placeholder="Cash declared">
+                    <button id="shiftCloseBtn" class="danger" type="button">Close shift</button>
+                </div>
             </section>
         </section>
 
@@ -146,6 +192,28 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 </div>
                 <div id="stockMovementsTable" class="table-wrap"></div>
             </section>
+            <section id="purchaseOrdersPanel" class="panel hidden" style="margin-top:16px">
+                <div class="section-heading">
+                    <div>
+                        <h2>Purchase orders</h2>
+                        <span class="muted">Order stock from suppliers and receive the deliveries</span>
+                    </div>
+                </div>
+                <div class="form-grid">
+                    <select id="poSupplier" required><option value="">Select supplier</option></select>
+                    <select id="poProduct" required><option value="">Select product</option></select>
+                    <input id="poQuantity" type="number" min="1" max="100000" step="1" placeholder="Quantity">
+                    <input id="poUnitCost" type="number" min="0" step="0.01" placeholder="Unit cost">
+                    <input id="poExpectedAt" type="date" placeholder="Expected date">
+                    <button id="poAddLine" class="secondary" type="button">Add line</button>
+                </div>
+                <div id="poLines" class="table-wrap"></div>
+                <div class="form-grid">
+                    <input id="poNotes" maxlength="200" placeholder="Notes (optional)">
+                    <button id="poCreateBtn" class="primary" type="button">Create purchase order</button>
+                </div>
+                <div id="purchaseOrdersTable" class="table-wrap"></div>
+            </section>
             <div id="productsTable" class="panel table-wrap"></div>
         </section>
 
@@ -155,6 +223,28 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <form class="panel simpleForm" data-table="suppliers"><h2>Suppliers</h2><input name="name" placeholder="Name"><input name="phone" placeholder="Phone"><input name="email" placeholder="Email"><input name="kra_pin" placeholder="KRA PIN"><button class="primary">Save supplier</button></form>
             </div>
             <div id="peopleTables" class="panel table-wrap"></div>
+            <form id="customerPaymentForm" class="panel" style="margin-top:16px">
+                <h2>Customer payments</h2>
+                <p class="muted">Record a payment against a customer's credit balance. Cash payments are logged as cash income.</p>
+                <div class="form-grid">
+                    <select id="paymentCustomer" required><option value="">Select customer</option></select>
+                    <input id="paymentAmount" type="number" min="0" step="0.01" placeholder="Amount" required>
+                    <select id="paymentChannel"><option>Cash</option><option>M-Pesa</option><option>Card</option><option>Bank</option><option>Mobile Money</option><option>Voucher</option></select>
+                    <input id="paymentReference" maxlength="120" placeholder="Reference (optional)">
+                    <button class="primary" type="submit">Record payment</button>
+                </div>
+            </form>
+            <form id="supplierPaymentForm" class="panel" style="margin-top:16px">
+                <h2>Supplier payments</h2>
+                <p class="muted">Pay down what the business owes a supplier. Cash payments are logged as cash expenses.</p>
+                <div class="form-grid">
+                    <select id="supplierPaymentSupplier" required><option value="">Select supplier</option></select>
+                    <input id="supplierPaymentAmount" type="number" min="0" step="0.01" placeholder="Amount" required>
+                    <select id="supplierPaymentChannel"><option>Cash</option><option>M-Pesa</option><option>Card</option><option>Bank</option><option>Mobile Money</option><option>Voucher</option></select>
+                    <input id="supplierPaymentReference" maxlength="120" placeholder="Reference (optional)">
+                    <button class="primary" type="submit">Record payment</button>
+                </div>
+            </form>
         </section>
 
         <section id="quotations" class="view hidden">
@@ -215,7 +305,34 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 </div>
                 <div id="cashFlowEntries" class="table-wrap"></div>
             </section>
-            <form class="panel simpleForm" data-table="cash_transactions" style="margin-top:16px"><h2>Manual cash movement</h2><div class="form-grid"><select name="type"><option>INCOME</option><option>EXPENSE</option></select><input name="category" placeholder="Category" required><input name="description" placeholder="Description"><input name="amount" type="number" min="0" step="0.01" placeholder="Amount" required><input name="reference" placeholder="Reference"></div><button class="primary">Add movement</button></form>
+            <form id="cashMovementForm" class="panel simpleForm" data-table="cash_transactions" style="margin-top:16px">
+                <h2>Manual cash movement</h2>
+                <div class="form-grid">
+                    <select name="type" id="cashMovementType">
+                        <option>INCOME</option>
+                        <option>EXPENSE</option>
+                    </select>
+                    <select name="category" id="cashMovementExpenseCategory" title="Expense category">
+                        <?php foreach (EXPENSE_CATEGORIES as $sajiExpense): ?>
+                        <option><?= htmlspecialchars($sajiExpense, ENT_QUOTES, 'UTF-8') ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <input name="category" id="cashMovementIncomeCategory" placeholder="Income category" required>
+                    <input name="description" placeholder="Description">
+                    <input name="amount" type="number" min="0" step="0.01" placeholder="Amount" required>
+                    <input name="reference" placeholder="Reference">
+                </div>
+                <button class="primary">Add movement</button>
+            </form>
+            <section class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>Receivables</h2><span class="muted">Outstanding credit balances and ageing</span></div>
+                <div id="receivablesCards" class="analytics-kpis"></div>
+                <div id="receivablesTable" class="table-wrap"></div>
+            </section>
+            <section class="panel" style="margin-top:16px">
+                <div class="section-heading"><h2>Cash shift history</h2><span class="muted">Declared cash versus expected and the variance</span></div>
+                <div id="shiftHistoryTable" class="table-wrap"></div>
+            </section>
         </section>
 
         <section id="stockanalytics" class="view hidden">
@@ -234,9 +351,68 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
                 <form id="userForm" class="panel admin-only"><h2>Create account</h2><input name="full_name" placeholder="Full name"><input name="username" placeholder="Username"><input name="password" placeholder="Temporary password"><select name="role"><option>EMPLOYEE</option><option>MANAGER</option><option>ADMIN</option></select><input name="branch" value="Main"><button class="primary">Create user</button></form>
                 <form class="panel simpleForm" data-table="employees"><h2>Employees</h2><input name="name" placeholder="Name"><input name="phone" placeholder="Phone"><input name="role" placeholder="Role"><input name="salary" type="number" placeholder="Salary"><button class="primary">Save employee</button></form>
                 <form class="panel simpleForm" data-table="branches"><h2>Branches</h2><input name="name" placeholder="Branch name"><input name="location" placeholder="Location"><input name="phone" placeholder="Phone"><button class="primary">Save branch</button></form>
-                <form class="panel simpleForm admin-only" data-table="expenses"><h2>Expenses</h2><input name="title" placeholder="Title"><input name="category" placeholder="Category"><input name="amount" type="number" placeholder="Amount"><input name="paid_by" placeholder="Paid by"><button class="primary">Record expense</button></form>
+                <form class="panel simpleForm admin-only" data-table="expenses"><h2>Expenses</h2><input name="title" placeholder="Title"><select name="category"><?php foreach (EXPENSE_CATEGORIES as $sajiExpense): ?><option><?= htmlspecialchars($sajiExpense, ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select><input name="amount" type="number" placeholder="Amount"><input name="paid_by" placeholder="Paid by"><button class="primary">Record expense</button></form>
                 <form id="resetBusinessForm" class="panel admin-only"><h2>Start afresh</h2><p class="muted">Deletes sales, stock, customers, suppliers, quotations, expenses, cash movements, employees, branches, and operational history. User accounts are preserved.</p><input name="confirmation" placeholder="Type RESET BUSINESS DATA"><button class="danger" type="submit">Delete all business data</button></form>
             </div>
+            <section id="adminRecordEdit" class="panel admin-only" style="margin-top:16px">
+                <div class="section-heading"><h2>Edit products &amp; suppliers</h2><span class="muted">Full-field editing, admin only. Changes are audited.</span></div>
+                <h3>Product</h3>
+                <div class="toolbar">
+                    <select id="adminProductPick"><option value="">Select product</option></select>
+                    <button id="adminProductLoad" class="secondary" type="button">Load product</button>
+                </div>
+                <form id="adminProductEditForm" class="form-grid hidden">
+                    <input type="hidden" name="id">
+                    <label>SKU<input name="sku" maxlength="80" required></label>
+                    <label>Barcode<input name="barcode" maxlength="80"></label>
+                    <label>Product name<input name="name" maxlength="120" required></label>
+                    <label>Category<input name="category" maxlength="80" required></label>
+                    <label>Brand<input name="brand" maxlength="80"></label>
+                    <label>Warehouse<input name="warehouse" maxlength="80"></label>
+                    <label>Branch<input name="branch" maxlength="80"></label>
+                    <label>Supplier<select name="supplier_id" id="adminProductSupplier"><option value="">Unassigned</option></select></label>
+                    <label>Buying price<input name="buying_price" type="number" min="0" step="0.01" required></label>
+                    <label>Selling price<input name="selling_price" type="number" min="0" step="0.01" required></label>
+                    <label>VAT rate<input name="vat_rate" type="number" min="0" max="1" step="0.01" required></label>
+                    <label>Stock quantity<input name="quantity" type="number" min="0" step="1" required></label>
+                    <label>Supplied quantity<input name="supplied_quantity" type="number" min="0" step="1" required></label>
+                    <label>Reorder level<input name="reorder_level" type="number" min="0" step="1"></label>
+                    <label>Note<input name="note" maxlength="200" placeholder="Reason for the change (goes to the audit log)"></label>
+                    <button class="primary">Save product</button>
+                </form>
+                <p class="muted hidden" id="adminProductHint">Stock quantity edits are recorded as an ADJUSTMENT movement. Completed sales keep their original prices.</p>
+                <h3>Customer</h3>
+                <div class="toolbar">
+                    <select id="adminCustomerPick"><option value="">Select customer</option></select>
+                    <button id="adminCustomerLoad" class="secondary" type="button">Load customer</button>
+                </div>
+                <form id="adminCustomerEditForm" class="form-grid hidden">
+                    <input type="hidden" name="id">
+                    <label>Name<input name="name" maxlength="120" required></label>
+                    <label>Phone<input name="phone" maxlength="40"></label>
+                    <label>Email<input name="email" type="email" maxlength="120"></label>
+                    <label>KRA PIN<input name="kra_pin" maxlength="40"></label>
+                    <label>Balance<input name="balance" type="number" min="0" step="0.01"></label>
+                    <label>Note<input name="note" maxlength="200" placeholder="Reason for the change (goes to the audit log)"></label>
+                    <button class="primary">Save customer</button>
+                </form>
+                <p class="muted hidden" id="adminCustomerHint">The balance is what the customer owes on credit. Enter the full amount owed; a blank value keeps the current balance.</p>
+                <h3>Supplier</h3>
+                <div class="toolbar">
+                    <select id="adminSupplierPick"><option value="">Select supplier</option></select>
+                    <button id="adminSupplierLoad" class="secondary" type="button">Load supplier</button>
+                </div>
+                <form id="adminSupplierEditForm" class="form-grid hidden">
+                    <input type="hidden" name="id">
+                    <label>Name<input name="name" maxlength="120" required></label>
+                    <label>Phone<input name="phone" maxlength="40"></label>
+                    <label>Email<input name="email" type="email" maxlength="120"></label>
+                    <label>KRA PIN<input name="kra_pin" maxlength="40"></label>
+                    <label>Balance<input name="balance" type="number" min="0" step="0.01"></label>
+                    <label>Note<input name="note" maxlength="200" placeholder="Reason for the change (goes to the audit log)"></label>
+                    <button class="primary">Save supplier</button>
+                </form>
+            </section>
             <section id="importPanel" class="panel admin-only" style="margin-top:16px">
                 <div class="section-heading"><h2>CSV import</h2><span class="muted">Preview first; nothing is written until you import</span></div>
                 <div class="form-grid">
@@ -443,7 +619,8 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         <input type="hidden" name="source">
         <input type="hidden" name="id">
         <label id="cashEntryTypeWrap">Type<select name="type"><option value="INCOME">Cash in</option><option value="EXPENSE">Cash out</option></select></label>
-        <label>Category<input name="category" maxlength="80" required></label>
+        <label id="cashEntryExpenseCategoryWrap">Category<select name="category" id="cashEntryExpenseCategory"><?php foreach (EXPENSE_CATEGORIES as $sajiExpense): ?><option><?= htmlspecialchars($sajiExpense, ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></label>
+        <label id="cashEntryIncomeCategoryWrap">Category<input name="category" id="cashEntryIncomeCategory" maxlength="80"></label>
         <label><span id="cashEntryDescriptionLabel">Description</span><input name="description" maxlength="255"></label>
         <label>Amount<input name="amount" type="number" min="0" step="0.01" required></label>
         <label><span id="cashEntryReferenceLabel">Reference</span><input name="reference" maxlength="120"></label>
@@ -471,6 +648,19 @@ $defaultBranch = db()->query('SELECT name, location, phone FROM branches ORDER B
         <div class="button-row quotation-edit-actions">
             <button id="quotationEditCancel" class="secondary" type="button">Cancel</button>
             <button class="primary">Save changes</button>
+        </div>
+    </form>
+</div>
+<div id="poReceiveModal" class="hidden payment-loading-backdrop" aria-live="polite">
+    <form id="poReceiveForm" class="setup-panel stack quotation-edit-panel">
+        <h2 id="poReceiveTitle">Receive purchase order</h2>
+        <input type="hidden" name="purchase_order_id">
+        <p class="muted">Enter the units received per line. A buying price updates the product cost.</p>
+        <div id="poReceiveLines" class="table-wrap quotation-edit-lines"></div>
+        <label class="inline-check"><input type="checkbox" id="poReceivePaidUpfront"> Paid upfront (skip adding the value to the supplier balance)</label>
+        <div class="button-row quotation-edit-actions">
+            <button id="poReceiveCancel" class="secondary" type="button">Cancel</button>
+            <button class="primary">Receive units</button>
         </div>
     </form>
 </div>

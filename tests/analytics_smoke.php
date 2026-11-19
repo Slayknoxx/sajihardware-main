@@ -145,8 +145,13 @@ try {
     seed_sale('AN-010', $toUtc($lastYear->format('Y-m-d') . ' 11:00:00'), 'COMPLETED', [[1, 1, 79000]]);
 
     $expense = $pdo->prepare('INSERT INTO expenses(title, category, amount, paid_by, created_at) VALUES(?,?,?,?,?)');
-    $expense->execute(['Shop rent', 'Rent', 200000, 'admin', $toUtc($today->format('Y-m-d') . ' 09:00:00')]);
+    $expense->execute(['Shop rent', 'Rent & Rates', 200000, 'admin', $toUtc($today->format('Y-m-d') . ' 09:00:00')]);
     $expense->execute(['Water', 'Utilities', 50000, 'admin', $toUtc($yesterday->format('Y-m-d') . ' 09:00:00')]);
+
+    // Manual cash movement (EXPENSE) for today; it must join the expenses table
+    // in the analytics breakdown.
+    $pdo->prepare("INSERT INTO cash_transactions(type, category, description, amount, reference, created_by, created_at) VALUES('EXPENSE',?,?,?,?,?,?)")
+        ->execute(['Transport & Fuel', 'Matatu fare', 30000, 'TRIP-1', 1, $toUtc($today->format('Y-m-d') . ' 10:00:00')]);
 
     // --- Period maths -----------------------------------------------------
     $period = analytics_period('today');
@@ -212,8 +217,19 @@ try {
     check('new customers are counted', (int)$report['customers']['new'] === 1, (string)$report['customers']['new']);
     check('named customer appears in the top list', ($report['customers']['top'][0]['name'] ?? '') === 'Acme Ltd');
     check('walk-in sales are counted separately', (int)$report['customers']['walk_in_sales'] === 3, (string)$report['customers']['walk_in_sales']);
-    check('expenses are grouped by category', ($report['expenses']['by_category'][0]['name'] ?? '') === 'Rent' && (int)$report['expenses']['total'] === 200000);
-    check('VAT breakdown is present', count($report['money']['vat_breakdown']) === 1 && (int)$report['money']['vat_breakdown'][0]['vat'] === 50207);
+    check('expenses are grouped by category', ($report['expenses']['by_category'][0]['name'] ?? '') === 'Rent & Rates' && (int)$report['expenses']['total'] === 230000, json_encode($report['expenses']));
+    $transport = array_values(array_filter($report['expenses']['by_category'], static fn (array $row): bool => $row['name'] === 'Transport & Fuel'));
+    check('manual cash movement expenses appear in the breakdown', count($transport) === 1 && (int)$transport[0]['total'] === 30000 && (int)$transport[0]['count'] === 1, json_encode($transport));
+    check('unused chart-of-accounts lines are reported', in_array('Insurance', $report['expenses']['unused'] ?? [], true)
+        && !in_array('Rent & Rates', $report['expenses']['unused'] ?? [], true), json_encode($report['expenses']['unused'] ?? null));
+    $expenseEntries = $report['expenses']['entries'] ?? [];
+    $cashEntry = array_values(array_filter($expenseEntries, static fn (array $row): bool => $row['source'] === 'cash_transaction'));
+    check('expense entries list every row newest first', count($expenseEntries) === 2
+        && ($expenseEntries[0]['description'] ?? '') === 'Matatu fare', json_encode($expenseEntries));
+    check('expense entries carry what the editor needs', count($cashEntry) === 1
+        && (int)$cashEntry[0]['id'] === 1 && $cashEntry[0]['category'] === 'Transport & Fuel'
+        && (int)$cashEntry[0]['amount'] === 30000, json_encode($cashEntry));
+    check('VAT collected stays in the money section', (int)$report['money']['vat'] === 50207, (string)($report['money']['vat'] ?? 'missing'));
     check('inventory low/out counts are present', $report['inventory']['low_stock'] === 0 && $report['inventory']['out_of_stock'] === 0);
 
     // --- Compliance -------------------------------------------------------

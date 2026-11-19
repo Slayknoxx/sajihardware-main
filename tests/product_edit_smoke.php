@@ -261,8 +261,60 @@ try {
     ]);
     check('a zero selling price is accepted', ($zero['ok'] ?? false) === true && (int)$zero['selling_price'] === 0);
 
+    // --- Deleting products ------------------------------------------------
+    $deleteBlocked = static function (array $user, int $id): string {
+        try {
+            product_delete($user, ['id' => $id]);
+            return '';
+        } catch (InvalidArgumentException $e) {
+            return $e->getMessage();
+        }
+    };
+
+    $saleBlock = $deleteBlocked($manager, $productId);
+    check('a product with sale history cannot be deleted',
+        str_contains($saleBlock, 'sale line') && str_contains($saleBlock, 'cannot be deleted'), $saleBlock);
+    $stillThere = $pdo->prepare('SELECT COUNT(*) FROM products WHERE id = ?');
+    $stillThere->execute([$productId]);
+    check('a blocked delete leaves the product in place', (int)$stillThere->fetchColumn() === 1);
+
+    $pdo->prepare('INSERT INTO quotations(quote_no, created_by) VALUES(?,?)')
+        ->execute(['QT-DEL-1', (int)$admin['id']]);
+    $quoteId = (int)$pdo->lastInsertId();
+    $pdo->prepare('INSERT INTO quotation_items(quotation_id, product_id, product_name, quantity, unit_price, total) VALUES(?,?,?,?,?,?)')
+        ->execute([$quoteId, $productId, 'Cordless Drill', 1, 12000, 12000]);
+    $quoteBlock = $deleteBlocked($admin, $productId);
+    check('a quotation line also blocks deletion',
+        str_contains($quoteBlock, 'quotation line') && str_contains($quoteBlock, 'cannot be deleted'), $quoteBlock);
+
+    // A product with no documents can go, stock and stock movements included.
+    $pdo->prepare('INSERT INTO products(sku, name, category, buying_price, selling_price, quantity) VALUES(?,?,?,?,?,?)')
+        ->execute(['SKU-DEL-1', 'Spare blade', 'Consumables', 2000, 4000, 3]);
+    $spareId = (int)$pdo->lastInsertId();
+    $pdo->prepare('INSERT INTO stock_movements(product_id, quantity_delta, reason, reference, created_by) VALUES(?,?,?,?,?)')
+        ->execute([$spareId, 3, 'RESTOCK', 'GRN-DEL-1', (int)$admin['id']]);
+
+    $deleted = product_delete($manager, ['id' => $spareId]);
+    check('a manager can delete a product with no documents',
+        ($deleted['ok'] ?? false) === true && (int)($deleted['quantity'] ?? 0) === 3, json_encode($deleted));
+    $gone = $pdo->prepare('SELECT COUNT(*) FROM products WHERE id = ?');
+    $gone->execute([$spareId]);
+    check('the deleted product leaves the catalogue', (int)$gone->fetchColumn() === 0);
+    $movementCount = $pdo->prepare('SELECT COUNT(*) FROM stock_movements WHERE product_id = ?');
+    $movementCount->execute([$spareId]);
+    check('the deleted product\'s stock movements are removed', (int)$movementCount->fetchColumn() === 0);
+    $deleteAudit = $pdo->query("SELECT action, details FROM audit_logs WHERE action = 'DELETE_PRODUCT' ORDER BY id DESC LIMIT 1")->fetch();
+    check('deleting a product writes an audit entry', ($deleteAudit['action'] ?? '') === 'DELETE_PRODUCT'
+        && str_contains((string)($deleteAudit['details'] ?? ''), 'SKU-DEL-1')
+        && str_contains((string)($deleteAudit['details'] ?? ''), '3 unit(s) in stock discarded'),
+        json_encode($deleteAudit));
+
+    $unknownDelete = $deleteBlocked($admin, 999999);
+    check('deleting an unknown product is rejected', str_contains($unknownDelete, 'not found'), $unknownDelete);
+
     // --- Wiring -----------------------------------------------------------
     check('product editing is limited to admins and managers', preg_match("/update_product'\\s*\\)\\s*\\{\\s*\\\$user\\s*=\\s*require_role\\(\\['ADMIN','MANAGER'\\]\\)/", (string)file_get_contents(__DIR__ . '/../api.php')) === 1);
+    check('product deletion is limited to admins and managers', preg_match("/delete_product'\\s*\\)\\s*\\{\\s*\\\$user\\s*=\\s*require_role\\(\\['ADMIN','MANAGER'\\]\\)/", (string)file_get_contents(__DIR__ . '/../api.php')) === 1);
     check('the product edit helper is loaded by the API', str_contains((string)file_get_contents(__DIR__ . '/../api.php'), "lib/products.php"));
 } finally {
     $cleanup();

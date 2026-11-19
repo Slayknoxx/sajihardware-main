@@ -2,7 +2,8 @@ let csrfToken = '';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const api = (action, data, method = 'POST') => fetch(`../api.php?action=${action}`, {method, headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok){const error=new Error(j.error||'Request failed'); error.code=j.code; error.license=j.license; throw error;} return j});
 const paymentApi = (path, data, method = 'POST') => fetch(`../api/${path}`, {method, credentials:'same-origin', headers:{'Content-Type':'application/json', ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {})}, body:data ? JSON.stringify(data) : undefined}).then(async r=>{const j=await r.json(); if(!r.ok) throw new Error(j.error||'Payment request failed'); return j});
-const state = {user:null, permissions:{}, pages:[], products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1, people:{customers:[],suppliers:[]}, cashEntries:[], staff:{employees:[],branches:[]}};
+const state = {user:null, permissions:{}, pages:[], products:[], cart:[], page:'dashboard', license:null, company:null, setupCompleted:true, checkoutKey:null, checkoutPayload:null, auditPage:1, people:{customers:[],suppliers:[]}, cashEntries:[], staff:{employees:[],branches:[]}, customerOptions:[], returnSale:null, poLines:[]};
+const PAYMENT_METHODS = ['Cash', 'M-Pesa', 'Card', 'Bank', 'Mobile Money', 'Voucher', 'Credit'];
 const money = n => `KES ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const showPaymentLoading = (label='Waiting for M-Pesa confirmation...') => {
   const modal = document.getElementById('paymentLoadingModal');
@@ -293,6 +294,158 @@ async function loadSales(){
     const salesRows = (await api('list&table=sales', null, 'GET')).rows;
     renderSalesHistory(salesRows, '#salesHistoryTable');
   }
+  await Promise.all([refreshCustomerOptions('#customerSelect'), refreshReturnsPanel(), refreshShiftPanel()]);
+}
+async function refreshCustomerOptions(selector){
+  const target = qs(selector);
+  if (!target) return;
+  try {
+    state.customerOptions = (await api('customer_options', null, 'GET')).rows || [];
+  } catch (error) {
+    state.customerOptions = [];
+  }
+  const previous = target.value;
+  target.innerHTML = '<option value="" selected>Walk-in Customer</option>'
+    + state.customerOptions.map(customer => `<option value="${esc(customer.id)}">${esc(customer.name)}${customer.phone ? ` · ${esc(customer.phone)}` : ''}</option>`).join('');
+  if (previous && state.customerOptions.some(customer => String(customer.id) === previous)) target.value = previous;
+}
+function renderReturnsTable(rows){
+  const target = qs('#returnsTable');
+  if (!target) return;
+  if (!rows?.length) {
+    target.innerHTML = '<p class="muted">No returns recorded yet.</p>';
+    return;
+  }
+  target.innerHTML = `<table><thead><tr><th>Date</th><th>Receipt</th><th>Product</th><th>Qty</th><th>Amount</th><th>Refund</th><th>Reason</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(receiptDate(row.created_at))}</td><td>${esc(row.receipt_no || '—')}</td><td>${esc(row.product_name || '—')}</td><td>${esc(row.quantity || '')}</td><td>${money(row.amount)}</td><td>${esc(row.refund_method || '—')}</td><td>${esc(row.reason || '—')}</td></tr>`).join('')}</tbody></table>`;
+}
+async function refreshReturnsPanel(){
+  try {
+    const rows = (await api('list&table=returns', null, 'GET')).rows || [];
+    renderReturnsTable(rows);
+  } catch (error) {
+    const target = qs('#returnsTable');
+    if (target) target.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
+}
+async function lookupReturnSale(){
+  const canManage = ['ADMIN','MANAGER'].includes(state.user?.role);
+  const receiptInput = qs('#returnReceipt');
+  const itemsTarget = qs('#returnSaleItems');
+  const submitRow = qs('#returnSubmitRow');
+  if (!canManage) {
+    toast('Only admins and managers can record returns');
+    return;
+  }
+  const receipt = receiptInput.value.trim();
+  if (!receipt) {
+    toast('Enter a receipt number first');
+    return;
+  }
+  try {
+    const result = await api(`sale_lookup&receipt=${encodeURIComponent(receipt)}`, null, 'GET');
+    state.returnSale = result.sale;
+    const open = result.sale.items.filter(item => Number(item.quantity) - Number(item.returned_quantity) > 0);
+    if (!open.length) {
+      state.returnSale = null;
+      itemsTarget.innerHTML = '<p class="muted">Every line on this receipt has already been fully returned.</p>';
+      submitRow.classList.add('hidden');
+      return;
+    }
+    itemsTarget.innerHTML = `<table><thead><tr><th>Product</th><th>Unit price</th><th>Sold</th><th>Returned</th><th>Return qty</th></tr></thead><tbody>${open.map(item => `<tr><td>${esc(item.product_name)}</td><td>${money(item.unit_price)}</td><td>${esc(item.quantity)}</td><td>${esc(item.returned_quantity)}</td><td><input type="number" min="0" max="${Number(item.quantity) - Number(item.returned_quantity)}" step="1" value="0" data-return-qty="${item.id}"></td></tr>`).join('')}</tbody></table>`;
+    // Refunds default to the way the customer paid; credit sales never took
+    // money in, so they default to no refund.
+    const refundSelect = qs('#returnRefundMethod');
+    if (refundSelect) {
+      const paidWith = result.sale.payment_method;
+      const known = [...refundSelect.options].some(option => option.value === paidWith);
+      refundSelect.value = known ? paidWith : 'None';
+    }
+    submitRow.classList.remove('hidden');
+  } catch (error) {
+    state.returnSale = null;
+    itemsTarget.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+    submitRow.classList.add('hidden');
+  }
+}
+async function recordReturn(){
+  const canManage = ['ADMIN','MANAGER'].includes(state.user?.role);
+  if (!canManage) return toast('Only admins and managers can record returns');
+  const sale = state.returnSale;
+  if (!sale) return toast('Load a receipt first');
+  const lines = qsa('[data-return-qty]')
+    .map(input => ({item_id: Number(input.dataset.returnQty), quantity: Number(input.value) || 0}))
+    .filter(line => line.quantity > 0);
+  if (!lines.length) return toast('Enter a quantity to return on at least one line');
+  if (lines.length > 1) return toast('Record one product line per return');
+  const reason = qs('#returnReason').value.trim();
+  const refundMethod = qs('#returnRefundMethod')?.value || '';
+  try {
+    const result = await api('create_return', {sale_id: sale.id, sale_item_id: lines[0].item_id, quantity: lines[0].quantity, reason, refund_method: refundMethod});
+    toast(`Return recorded: ${result.product_name} ×${result.quantity} (${result.refund_method} refund)`);
+    state.returnSale = null;
+    qs('#returnSaleItems').innerHTML = '';
+    qs('#returnSubmitRow').classList.add('hidden');
+    qs('#returnReason').value = '';
+    qs('#returnReceipt').value = '';
+    await refreshReturnsPanel();
+    await refreshShiftPanel();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+function renderShiftPanel(shift){
+  const current = qs('#shiftCurrent');
+  const openForm = qs('#shiftOpenForm');
+  const closeForm = qs('#shiftCloseForm');
+  if (!current || !openForm || !closeForm) return;
+  if (shift) {
+    const movements = [];
+    if (Number(shift.cash_in) > 0) movements.push(`+${money(shift.cash_in)} cash in`);
+    if (Number(shift.cash_out) > 0) movements.push(`−${money(shift.cash_out)} cash out`);
+    if (Number(shift.cash_refunds) > 0) movements.push(`−${money(shift.cash_refunds)} refunds`);
+    const detail = movements.length ? ` <span class="muted">(${movements.join(', ')})</span>` : '';
+    current.innerHTML = `<p>Shift open since ${esc(receiptDate(shift.opened_at))} · opening float ${money(shift.opening_float)} · expected cash <b>${money(shift.cash_expected)}</b>${detail}</p>`;
+    openForm.classList.add('hidden');
+    closeForm.classList.remove('hidden');
+  } else {
+    current.innerHTML = '<p class="muted">No open shift. Set the opening float to start one.</p>';
+    openForm.classList.remove('hidden');
+    closeForm.classList.add('hidden');
+  }
+}
+async function refreshShiftPanel(){
+  try {
+    const result = await api('shift_current', null, 'GET');
+    renderShiftPanel(result.shift);
+  } catch (error) {
+    const current = qs('#shiftCurrent');
+    if (current) current.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
+}
+async function shiftOpen(){
+  const openingFloat = qs('#shiftOpeningFloat').value;
+  if (openingFloat === '' || Number(openingFloat) < 0) return toast('Enter the opening float');
+  try {
+    await api('shift_open', {opening_float: openingFloat});
+    qs('#shiftOpeningFloat').value = '';
+    toast('Shift opened');
+    await refreshShiftPanel();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function shiftClose(){
+  const declared = qs('#shiftCashDeclared').value;
+  if (declared === '' || Number(declared) < 0) return toast('Enter the cash counted in the till');
+  try {
+    const result = await api('shift_close', {cash_declared: declared});
+    qs('#shiftCashDeclared').value = '';
+    const varianceLabel = result.variance === 0 ? 'balanced' : (result.variance > 0 ? 'over' : 'short');
+    toast(`Shift closed. Expected ${money(result.cash_expected)}, declared ${money(result.cash_declared)} (${varianceLabel} ${money(Math.abs(result.variance))})`);
+    await refreshShiftPanel();
+  } catch (error) {
+    toast(error.message);
+  }
 }
 function renderSalesHistory(rows, targetSelector){
   const target = qs(targetSelector);
@@ -351,17 +504,24 @@ function renderCart(){
   }
   enforceMpesaInput();
 
+  const creditHint = qs('#creditHint');
+  if (creditHint) creditHint.classList.toggle('hidden', paymentMethod !== 'Credit');
+
   qs('#cartLines').innerHTML = state.cart.length ? state.cart.map(x=>`<div class="cart-line"><div><b>${esc(x.name)}</b><small>${money(x.price*x.qty)}</small></div><input type="number" min="1" value="${esc(x.qty)}" data-qty="${x.id}"><button data-remove="${x.id}">×</button></div>`).join('') : '<p class="muted">Scan or tap products to add them.</p>';
   qsa('[data-qty]').forEach(i=>i.onchange=()=>{state.cart.find(x=>x.id===+i.dataset.qty).qty=Math.max(1,+i.value);renderCart()});
   qsa('[data-remove]').forEach(b=>b.onclick=()=>{state.cart=state.cart.filter(x=>x.id!==+b.dataset.remove);renderCart()});
   const subtotal=state.cart.reduce((s,x)=>s+x.price*x.qty,0), discount=+qs('#discount').value||0, total=Math.max(0,subtotal-discount), paid=+qs('#amountPaid').value||total, change = paymentMethod === 'Cash' ? Math.max(0, paid-total) : 0;
-  qs('#totals').innerHTML = `<div><span>Subtotal</span><b>${money(subtotal)}</b></div><div><span>VAT</span><b>Calculated by server</b></div><div><span>Discount</span><b>${money(discount)}</b></div><div class="grand"><span>Total</span><b>${money(total)}</b></div><div><span>Amount paid</span><b>${money(paid)}</b></div><div><span>Change</span><b>${money(change)}</b></div>`;
+  const onCredit = paymentMethod === 'Credit' && paid < total ? total - paid : 0;
+  qs('#totals').innerHTML = `<div><span>Subtotal</span><b>${money(subtotal)}</b></div><div><span>VAT</span><b>Calculated by server</b></div><div><span>Discount</span><b>${money(discount)}</b></div><div class="grand"><span>Total</span><b>${money(total)}</b></div><div><span>Amount paid</span><b>${money(paid)}</b></div>${onCredit ? `<div><span>On credit</span><b>${money(onCredit)}</b></div>` : ''}<div><span>Change</span><b>${money(change)}</b></div>`;
 }
 function resetCheckoutForm(){
   state.cart = [];
   state.checkoutKey = null;
   state.checkoutPayload = null;
+  const customerSelect = qs('#customerSelect');
+  if (customerSelect) customerSelect.value = '';
   qs('#customerName').value = '';
+  qs('#customerName').disabled = false;
   qs('#paymentMethod').value = '';
   qs('#mpesaPhone').value = '';
   qs('#discount').value = '';
@@ -373,6 +533,11 @@ async function checkout(){
   if (!paymentMethod) {
     throw new Error('Select a payment method.');
   }
+  const customerSelect = qs('#customerSelect');
+  const customerId = customerSelect && customerSelect.value ? customerSelect.value : '';
+  if (paymentMethod === 'Credit' && !customerId) {
+    throw new Error('Credit sales require a saved customer.');
+  }
   let mpesaPhone = '';
   if (paymentMethod === 'M-Pesa') {
     mpesaPhone = normalizeMpesaPhone(qs('#mpesaPhone').value);
@@ -381,7 +546,7 @@ async function checkout(){
     }
     qs('#mpesaPhone').value = mpesaPhone.replace(/^254/, '');
   }
-  const payload={cart:state.cart.map(item=>({id:item.id,qty:item.qty})), customer_name:qs('#customerName').value, payment_method:paymentMethod, discount:+qs('#discount').value||0, amount_paid:+qs('#amountPaid').value||0, mpesa_phone: paymentMethod === 'M-Pesa' ? mpesaPhone : ''};
+  const payload={cart:state.cart.map(item=>({id:item.id,qty:item.qty})), customer_id:customerId, customer_name:qs('#customerName').value, payment_method:paymentMethod, discount:+qs('#discount').value||0, amount_paid:+qs('#amountPaid').value||0, mpesa_phone: paymentMethod === 'M-Pesa' ? mpesaPhone : ''};
   const requestSignature = JSON.stringify(payload);
   if (!state.checkoutKey || state.checkoutPayload !== requestSignature) {
     state.checkoutKey = globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -477,13 +642,172 @@ async function loadProducts(){
   qs('#productForm').classList.toggle('hidden', !canManageProducts);
   qs('#restockPanel').classList.toggle('hidden', !canManageProducts);
   qs('#stockMovementsPanel').classList.toggle('hidden', !canManageProducts);
+  qs('#purchaseOrdersPanel').classList.toggle('hidden', !canManageProducts);
   qsa('[data-edit-product]').forEach(button => button.onclick = () => openProductEditor(+button.dataset.editProduct));
+  qsa('[data-delete-product]').forEach(button => button.onclick = () => deleteProduct(+button.dataset.deleteProduct));
   if (canManageProducts) {
     const suppliers=(await api('list&table=suppliers', null, 'GET')).rows;
     qs('#productSupplier').innerHTML='<option value="">Supplier (optional)</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
     qs('#productEditSupplier').innerHTML='<option value="">Unassigned</option>'+suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
     renderRestockProducts(rows);
+    renderPurchaseOrderInputs(suppliers, rows);
+    await loadPurchaseOrders(suppliers);
     await loadStockMovements();
+  }
+}
+function renderPurchaseOrderInputs(suppliers, products){
+  const supplierSelect = qs('#poSupplier');
+  const productSelect = qs('#poProduct');
+  if (!supplierSelect || !productSelect) return;
+  supplierSelect.innerHTML = '<option value="">Select supplier</option>' + suppliers.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  productSelect.innerHTML = '<option value="">Select product</option>' + products.map(p => `<option value="${esc(p.id)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('');
+}
+function renderPurchaseOrderLines(){
+  const target = qs('#poLines');
+  if (!target) return;
+  if (!state.poLines.length) {
+    target.innerHTML = '<p class="muted">No order lines yet.</p>';
+    return;
+  }
+  const total = state.poLines.reduce((sum, line) => sum + line.unit_cost * line.quantity, 0);
+  target.innerHTML = `<table><thead><tr><th>Product</th><th>Qty</th><th>Unit cost</th><th>Total</th><th></th></tr></thead><tbody>${state.poLines.map((line, index) => `<tr><td>${esc(line.name)}</td><td>${esc(line.quantity)}</td><td>${money(line.unit_cost)}</td><td>${money(line.unit_cost*line.quantity)}</td><td><button class="danger" type="button" data-po-remove-line="${index}">Remove</button></td></tr>`).join('')}</tbody></table><p class="muted">Order total: <b>${money(total)}</b></p>`;
+  qsa('[data-po-remove-line]').forEach(button => button.onclick = () => {
+    state.poLines.splice(Number(button.dataset.poRemoveLine), 1);
+    renderPurchaseOrderLines();
+  });
+}
+async function addPurchaseOrderLine(){
+  const productSelect = qs('#poProduct');
+  const productId = Number(productSelect.value);
+  if (!productId) return toast('Choose a product to order');
+  const quantity = Math.trunc(Number(qs('#poQuantity').value) || 0);
+  if (quantity < 1 || quantity > 100000) return toast('Enter a quantity between 1 and 100000');
+  const product = state.products.find(item => Number(item.id) === productId);
+  if (!product) return toast('Product not found');
+  const unitCost = qs('#poUnitCost').value.trim() === '' ? Number(product.buying_price ?? 0) : Number(qs('#poUnitCost').value);
+  const existing = state.poLines.find(line => line.product_id === productId);
+  if (existing) {
+    existing.quantity = Math.min(100000, existing.quantity + quantity);
+  } else {
+    state.poLines.push({product_id: productId, name: product.name, quantity, unit_cost: unitCost});
+  }
+  productSelect.value = '';
+  qs('#poQuantity').value = '';
+  qs('#poUnitCost').value = '';
+  renderPurchaseOrderLines();
+}
+async function createPurchaseOrder(){
+  if (!state.poLines.length) return toast('Add at least one product line');
+  const supplierId = Number(qs('#poSupplier').value);
+  if (!supplierId) return toast('Choose a supplier');
+  const payload = {
+    supplier_id: supplierId,
+    items: state.poLines.map(line => ({product_id: line.product_id, quantity: line.quantity, unit_cost: line.unit_cost})),
+    notes: qs('#poNotes').value.trim(),
+  };
+  if (qs('#poExpectedAt').value) payload.expected_at = qs('#poExpectedAt').value;
+  try {
+    const result = await api('create_purchase_order', payload);
+    state.poLines = [];
+    qs('#poNotes').value = '';
+    qs('#poExpectedAt').value = '';
+    renderPurchaseOrderLines();
+    await loadPurchaseOrders();
+    toast(`Purchase order created: ${result.po_number}`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+function renderPurchaseOrders(rows, suppliers){
+  const target = qs('#purchaseOrdersTable');
+  if (!target) return;
+  if (!rows?.length) {
+    target.innerHTML = '<p class="muted">No purchase orders yet.</p>';
+    return;
+  }
+  const supplierName = id => (suppliers || []).find(s => Number(s.id) === Number(id))?.name || `Supplier #${id}`;
+  target.innerHTML = `<table><thead><tr><th>Order</th><th>Supplier</th><th>Status</th><th>Total</th><th>Expected</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows.map(row => {
+    const status = String(row.status || '');
+    const cancellable = status === 'OPEN' || status === 'PARTIAL' || status === 'DRAFT';
+    const receivable = status === 'OPEN' || status === 'PARTIAL';
+    return `<tr><td>${esc(row.po_number)}</td><td>${esc(supplierName(row.supplier_id))}</td><td>${esc(status)}</td><td>${money(row.total)}</td><td>${esc(row.expected_at || '—')}</td><td>${esc(receiptDate(row.created_at))}</td><td>${receivable ? `<button class="secondary" type="button" data-po-receive="${row.id}">Receive</button> ` : ''}${cancellable && status !== 'RECEIVED' ? `<button class="danger" type="button" data-po-cancel="${row.id}">Cancel</button>` : ''}</td></tr>`;
+  }).join('')}</tbody></table>`;
+  qsa('[data-po-receive]').forEach(button => button.onclick = () => openPurchaseOrderReceive(+button.dataset.poReceive).catch(error => toast(error.message)));
+  qsa('[data-po-cancel]').forEach(button => button.onclick = () => cancelPurchaseOrder(+button.dataset.poCancel));
+}
+async function loadPurchaseOrders(suppliers){
+  let rows = [];
+  try {
+    rows = (await api('list&table=purchase_orders', null, 'GET')).rows || [];
+  } catch (error) {
+    rows = [];
+  }
+  if (!suppliers) {
+    try {
+      suppliers = (await api('list&table=suppliers', null, 'GET')).rows || [];
+    } catch (error) {
+      suppliers = [];
+    }
+  }
+  renderPurchaseOrders(rows, suppliers);
+}
+async function cancelPurchaseOrder(id){
+  if (!window.confirm('Cancel this purchase order?')) return;
+  try {
+    await api('cancel_purchase_order', {purchase_order_id: id});
+    toast('Purchase order cancelled');
+    await loadPurchaseOrders();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+function renderPurchaseOrderReceiveLines(order){
+  const target = qs('#poReceiveLines');
+  const open = (order.items || []).filter(item => Number(item.quantity) - Number(item.received_quantity) > 0);
+  if (!open.length) {
+    target.innerHTML = '<p class="muted">Every line has already been fully received.</p>';
+    return;
+  }
+  target.innerHTML = `<table><thead><tr><th>Product</th><th>Ordered</th><th>Received</th><th>Units now</th><th>New buying price</th></tr></thead><tbody>${open.map(item => {
+    const outstanding = Number(item.quantity) - Number(item.received_quantity);
+    return `<tr><td>${esc(item.product_name)}</td><td>${esc(item.quantity)}</td><td>${esc(item.received_quantity)}</td><td><input type="number" min="0" max="${outstanding}" step="1" value="0" data-receive-qty="${item.id}"></td><td><input type="number" min="0" step="0.01" placeholder="Optional" data-receive-price="${item.id}"></td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+async function openPurchaseOrderReceive(id){
+  const result = await api(`po_detail&id=${id}`, null, 'GET');
+  const order = result.order;
+  qs('#poReceiveForm').elements['purchase_order_id'].value = order.id;
+  qs('#poReceiveTitle').textContent = `Receive ${order.po_number}`;
+  renderPurchaseOrderReceiveLines(order);
+  qs('#poReceiveModal').classList.remove('hidden');
+}
+function closePurchaseOrderReceive(){
+  qs('#poReceiveModal').classList.add('hidden');
+}
+async function submitPurchaseOrderReceive(form){
+  const purchaseOrderId = Number(form.elements['purchase_order_id'].value);
+  const lines = qsa('[data-receive-qty]')
+    .map(input => {
+      const line = {item_id: Number(input.dataset.receiveQty), quantity: Number(input.value) || 0};
+      const priceInput = qs(`[data-receive-price="${line.item_id}"]`);
+      const price = priceInput ? priceInput.value.trim() : '';
+      if (price !== '') line.buying_price = price;
+      return line;
+    })
+    .filter(line => line.quantity > 0);
+  if (!lines.length) return toast('Enter the units received on at least one line');
+  try {
+    const paidUpfront = qs('#poReceivePaidUpfront').checked;
+    const result = await api('receive_purchase_order', {purchase_order_id: purchaseOrderId, lines, paid_upfront: paidUpfront});
+    closePurchaseOrderReceive();
+    const credit = paidUpfront || !result.credited
+      ? ''
+      : ` Supplier balance is now ${money(result.supplier_balance)}`;
+    toast(`Received ${result.received} unit(s): ${result.po_number} is now ${result.status}.${credit}`);
+    await loadPurchaseOrders();
+    await loadStockMovements();
+  } catch (error) {
+    toast(error.message);
   }
 }
 function renderProductTable(rows){
@@ -494,7 +818,7 @@ function renderProductTable(rows){
     const stock = Number(p.quantity) || 0;
     const low = stock <= (Number(p.reorder_level) || 0);
     const meta = [p.category, p.brand].filter(Boolean).map(esc).join(' · ');
-    return `<tr><td>${esc(p.sku||'')}</td><td><b>${esc(p.name||'')}</b><br><small class="muted">${meta}</small></td><td class="${low?'stock-low':''}">${stock}${low?' <small>low</small>':''}</td>${showCost?`<td>${money(p.buying_price)}</td>`:''}<td>${money(p.selling_price)}</td><td>${vatLabel(p.vat_rate)}</td><td>${esc(p.branch||'Main')}</td><td>${esc(p.supplier_name||'Unassigned')}</td>${canEdit?`<td><button class="secondary" type="button" data-edit-product="${p.id}">Edit</button></td>`:''}</tr>`;
+    return `<tr><td>${esc(p.sku||'')}</td><td><b>${esc(p.name||'')}</b><br><small class="muted">${meta}</small></td><td class="${low?'stock-low':''}">${stock}${low?' <small>low</small>':''}</td>${showCost?`<td>${money(p.buying_price)}</td>`:''}<td>${money(p.selling_price)}</td><td>${vatLabel(p.vat_rate)}</td><td>${esc(p.branch||'Main')}</td><td>${esc(p.supplier_name||'Unassigned')}</td>${canEdit?`<td><button class="secondary" type="button" data-edit-product="${p.id}">Edit</button> <button class="danger" type="button" data-delete-product="${p.id}">Delete</button></td>`:''}</tr>`;
   }).join('')}</tbody></table>`;
 }
 function vatLabel(rate){
@@ -529,6 +853,19 @@ function openProductEditor(id){
 function closeProductEditor(){
   qs('#productEditModal').classList.add('hidden');
 }
+function deleteProduct(id){
+  const product = (state.products || []).find(item => Number(item.id) === Number(id));
+  if (!product) return toast('Product not found');
+  const stock = Number(product.quantity) || 0;
+  const stockNote = stock > 0 ? ` ${stock} unit(s) in stock will be discarded.` : '';
+  if (!window.confirm(`Delete ${product.name} (${product.sku})?${stockNote} This cannot be undone.`)) return;
+  return api('delete_product', {id})
+    .then(async result => {
+      await loadProducts();
+      toast(`Deleted ${result.sku}`);
+    })
+    .catch(error => toast(error.message));
+}
 function renderRestockProducts(rows){
   const select = qs('#restockProduct');
   if (!select) return;
@@ -555,18 +892,39 @@ async function loadPeople(){
   qs('#peopleTables').innerHTML='<h2>Customers</h2>'+peopleTable(c,'customers')+'<h2>Suppliers</h2>'+peopleTable(s,'suppliers');
   qsa('[data-edit-person]').forEach(button => button.onclick = () => openPersonEditor(button.dataset.table, +button.dataset.editPerson));
   qsa('[data-delete-person]').forEach(button => button.onclick = () => deletePerson(button.dataset.table, +button.dataset.deletePerson));
+  const paymentCustomer = qs('#paymentCustomer');
+  if (paymentCustomer) {
+    const previous = paymentCustomer.value;
+    const debtors = c.filter(row => Number(row.balance) > 0);
+    const settled = c.filter(row => !(Number(row.balance) > 0));
+    paymentCustomer.innerHTML = '<option value="">Select customer</option>'
+      + debtors.map(row => `<option value="${esc(row.id)}">${esc(row.name)} · owes ${money(row.balance)}</option>`).join('')
+      + settled.map(row => `<option value="${esc(row.id)}">${esc(row.name)} · no outstanding balance</option>`).join('');
+    if (previous && c.some(row => String(row.id) === previous)) paymentCustomer.value = previous;
+  }
+  const supplierPaymentSelect = qs('#supplierPaymentSupplier');
+  if (supplierPaymentSelect) {
+    const previousSupplier = supplierPaymentSelect.value;
+    const debtors = s.filter(row => Number(row.balance) > 0);
+    const settled = s.filter(row => !(Number(row.balance) > 0));
+    supplierPaymentSelect.innerHTML = '<option value="">Select supplier</option>'
+      + debtors.map(row => `<option value="${esc(row.id)}">${esc(row.name)} · we owe ${money(row.balance)}</option>`).join('')
+      + settled.map(row => `<option value="${esc(row.id)}">${esc(row.name)} · nothing owed</option>`).join('');
+    if (previousSupplier && s.some(row => String(row.id) === previousSupplier)) supplierPaymentSelect.value = previousSupplier;
+  }
 }
 function peopleTable(rows, tableName){
   if (!rows.length) return '<p class="muted">No records yet.</p>';
   const canDelete = !!state.permissions['records.delete'];
   const canEdit = ['ADMIN','MANAGER'].includes(state.user?.role);
   const hasActions = canEdit || canDelete;
-  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th>${hasActions ? '<th>Action</th>' : ''}</tr></thead><tbody>${rows.map(row=>{
+  const showBalance = rows.some(row => row.balance !== undefined && row.balance !== null);
+  return `<table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>KRA PIN</th>${showBalance ? '<th>Credit balance</th>' : ''}${hasActions ? '<th>Action</th>' : ''}</tr></thead><tbody>${rows.map(row=>{
     const actions = [
       canEdit ? `<button class="secondary" type="button" data-edit-person="${row.id}" data-table="${esc(tableName)}">Edit</button>` : '',
       canDelete ? `<button class="danger" type="button" data-delete-person="${row.id}" data-table="${esc(tableName)}">Delete</button>` : '',
     ].filter(Boolean).join(' ');
-    return `<tr><td>${esc(row.name||'')}</td><td>${esc(row.phone||'')}</td><td>${esc(row.email||'')}</td><td>${esc(row.kra_pin||'')}</td>${hasActions ? `<td>${actions}</td>` : ''}</tr>`;
+    return `<tr><td>${esc(row.name||'')}</td><td>${esc(row.phone||'')}</td><td>${esc(row.email||'')}</td><td>${esc(row.kra_pin||'')}</td>${showBalance ? `<td>${money(row.balance)}</td>` : ''}${hasActions ? `<td>${actions}</td>` : ''}</tr>`;
   }).join('')}</tbody></table>`;
 }
 function openPersonEditor(table, id){
@@ -623,11 +981,12 @@ async function printQuotation(id){
 async function deleteQuotation(id, converted){ const message=converted ? 'Delete this converted quotation permanently? Its sale and sale receipt will be kept.' : 'Delete this quotation permanently?'; if(!window.confirm(message)) return; try{await api('delete_quotation',{id});await loadQuotations();toast('Quotation deleted')}catch(error){toast(error.message)} }
 async function acceptQuotation(id){ try{await api('accept_quotation',{id});await loadQuotations();toast('Quotation marked as accepted')}catch(error){toast(error.message)} }
 async function convertQuotation(id){
-  const paymentMethod=window.prompt('Payment method (Cash, M-Pesa, Card, Credit, etc.)','Cash');
+  const methods = PAYMENT_METHODS.filter(method => method !== 'M-Pesa');
+  const paymentMethod=window.prompt(`Payment method (${methods.join(', ')})`,'Cash');
   if(!paymentMethod) return;
   const amountPaid=window.prompt('Amount paid', '0');
   if(amountPaid===null) return;
-  try{const r=await api('convert_quotation',{id,payment_method:paymentMethod,amount_paid:+amountPaid||0});await loadQuotations();toast(`Sale created: ${r.receipt_no}`);await printReceipt(r.sale_id)}catch(error){toast(error.message)}
+  try{const r=await api('convert_quotation',{id,payment_method:paymentMethod.trim(),amount_paid:+amountPaid||0});await loadQuotations();toast(`Sale created: ${r.receipt_no}`);await printReceipt(r.sale_id)}catch(error){toast(error.message)}
 }
 const quoteEditor = {id:null, discount:0, lines:[], nextKey:1};
 async function openQuotationEditor(id){
@@ -729,6 +1088,83 @@ async function loadCashFlow(){
   state.cashEntries = result.entries || [];
   renderCashFlowEntries(state.cashEntries);
   qs('#cashFlowDate').value=date;
+  await Promise.all([refreshReceivables(), refreshShiftHistory()]);
+}
+function renderReceivables(data){
+  const cards = qs('#receivablesCards');
+  const table = qs('#receivablesTable');
+  if (!cards || !table) return;
+  const ageing = data.ageing || {};
+  cards.innerHTML = [
+    analyticsCard('Outstanding credit', money(data.outstanding), {sub: `${Number(data.debtors)} debtor(s) · all periods`}),
+    analyticsCard('0–30 days', money(ageing.current || 0)),
+    analyticsCard('31–60 days', money(ageing['31_60'] || 0)),
+    analyticsCard('61–90 days', money(ageing['61_90'] || 0)),
+    analyticsCard('Over 90 days', money(ageing.over_90 || 0)),
+  ].join('');
+  table.innerHTML = renderDebtorsTable(data.debtors_list);
+}
+function renderDebtorsTable(rows){
+  if (!rows?.length) return '<p class="muted analytics-empty">No customers with an outstanding balance.</p>';
+  return `<table><thead><tr><th>Customer</th><th>Phone</th><th>Balance</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name)}</td><td>${esc(row.phone || '—')}</td><td>${money(row.balance)}</td></tr>`).join('')}</tbody></table>`;
+}
+async function refreshReceivables(){
+  try {
+    renderReceivables(await api('receivables', null, 'GET'));
+  } catch (error) {
+    const cards = qs('#receivablesCards');
+    if (cards) cards.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
+}
+function renderShiftHistory(rows){
+  const target = qs('#shiftHistoryTable');
+  if (!target) return;
+  if (!rows?.length) {
+    target.innerHTML = '<p class="muted">No cash shifts recorded yet.</p>';
+    return;
+  }
+  target.innerHTML = `<table><thead><tr><th>Opened</th><th>Cashier</th><th>Float</th><th>Expected</th><th>Declared</th><th>Variance</th><th>Closed</th></tr></thead><tbody>${rows.map(row => {
+    const open = row.status === 'OPEN';
+    const variance = row.variance === null || row.variance === undefined ? null : Number(row.variance);
+    const varianceCell = open
+      ? '<td>—</td>'
+      : `<td class="${variance === 0 ? '' : variance > 0 ? 'stock-in' : 'stock-out'}">${variance === 0 ? 'Balanced' : (variance > 0 ? '+' : '') + money(variance)}</td>`;
+    return `<tr><td>${esc(receiptDate(row.opened_at))}</td><td>${esc(row.opened_by_name || '—')}</td><td>${money(row.opening_float)}</td><td>${row.cash_expected === null ? '—' : money(row.cash_expected)}</td><td>${row.cash_declared === null ? '—' : money(row.cash_declared)}</td>${varianceCell}<td>${open ? `<b>Open</b>` : esc(receiptDate(row.closed_at))}</td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+async function refreshShiftHistory(){
+  try {
+    renderShiftHistory((await api('shift_history&limit=20', null, 'GET')).rows || []);
+  } catch (error) {
+    const target = qs('#shiftHistoryTable');
+    if (target) target.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+  }
+}
+function syncCashMovementCategory(){
+  const form = qs('#cashMovementForm');
+  const expense = qs('#cashMovementExpenseCategory');
+  const income = qs('#cashMovementIncomeCategory');
+  if (!form || !expense || !income) return;
+  const isExpense = form.elements['type'].value === 'EXPENSE';
+  expense.disabled = !isExpense;
+  expense.classList.toggle('hidden', !isExpense);
+  income.disabled = isExpense;
+  income.classList.toggle('hidden', isExpense);
+  income.required = !isExpense;
+}
+function syncCashEntryCategory(){
+  const form = qs('#cashEntryEditForm');
+  const expenseWrap = qs('#cashEntryExpenseCategoryWrap');
+  const incomeWrap = qs('#cashEntryIncomeCategoryWrap');
+  const expense = qs('#cashEntryExpenseCategory');
+  const income = qs('#cashEntryIncomeCategory');
+  if (!form || !expenseWrap || !incomeWrap || !expense || !income) return;
+  const isExpense = form.elements['type'].value === 'EXPENSE';
+  expenseWrap.classList.toggle('hidden', !isExpense);
+  incomeWrap.classList.toggle('hidden', isExpense);
+  expense.disabled = !isExpense;
+  income.disabled = isExpense;
+  income.required = !isExpense;
 }
 function renderCashFlowEntries(rows){
   const target = qs('#cashFlowEntries');
@@ -746,26 +1182,46 @@ function renderCashFlowEntries(rows){
   }).join('')}</tbody></table>`;
   qsa('[data-edit-cash-entry]').forEach(button => button.onclick = () => openCashEntryEditor(button.dataset.source, +button.dataset.editCashEntry));
 }
-function openCashEntryEditor(source, id){
+function openCashEntryEditor(source, id, entries = state.cashEntries){
   if(state.user?.role !== 'ADMIN') return toast('Only an admin can edit cash-flow entries');
-  const entry = state.cashEntries.find(row => row.source === source && Number(row.id) === Number(id));
+  const entry = (entries || []).find(row => row.source === source && Number(row.id) === Number(id));
   if(!entry) return toast('Entry not found');
   const form = qs('#cashEntryEditForm');
-  const isExpense = source === 'expense';
+  const fromExpensesTable = source === 'expense';
   form.elements['source'].value = source;
   form.elements['id'].value = entry.id;
   form.elements['type'].value = entry.type === 'INCOME' ? 'INCOME' : 'EXPENSE';
-  form.elements['category'].value = entry.category || '';
+  const isCashExpense = form.elements['type'].value === 'EXPENSE';
+  const expenseSelect = qs('#cashEntryExpenseCategory');
+  const incomeInput = qs('#cashEntryIncomeCategory');
+  // Drop the option added for a legacy category the last time the editor opened.
+  [...expenseSelect.options].filter(option => option.dataset.legacy).forEach(option => option.remove());
+  const category = entry.category || '';
+  if (isCashExpense) {
+    if (category && ![...expenseSelect.options].some(option => option.value === category)) {
+      const legacy = document.createElement('option');
+      legacy.value = category;
+      legacy.textContent = category;
+      legacy.dataset.legacy = '1';
+      expenseSelect.appendChild(legacy);
+    }
+    expenseSelect.value = category || expenseSelect.options[0].value;
+    incomeInput.value = '';
+  } else {
+    incomeInput.value = category;
+    expenseSelect.value = expenseSelect.options[0].value;
+  }
+  syncCashEntryCategory();
   form.elements['description'].value = entry.description || '';
   form.elements['amount'].value = Number(entry.amount) || 0;
   form.elements['reference'].value = entry.reference || '';
-  qs('#cashEntryTypeWrap').classList.toggle('hidden', isExpense);
-  qs('#cashEntryEditTitle').textContent = isExpense ? 'Edit expense' : 'Edit cash movement';
-  qs('#cashEntryDescriptionLabel').textContent = isExpense ? 'Title' : 'Description';
-  qs('#cashEntryReferenceLabel').textContent = isExpense ? 'Paid by' : 'Reference';
-  form.elements['description'].required = isExpense;
+  qs('#cashEntryTypeWrap').classList.toggle('hidden', fromExpensesTable);
+  qs('#cashEntryEditTitle').textContent = fromExpensesTable ? 'Edit expense' : 'Edit cash movement';
+  qs('#cashEntryDescriptionLabel').textContent = fromExpensesTable ? 'Title' : 'Description';
+  qs('#cashEntryReferenceLabel').textContent = fromExpensesTable ? 'Paid by' : 'Reference';
+  form.elements['description'].required = fromExpensesTable;
   qs('#cashEntryEditModal').classList.remove('hidden');
-  form.elements['category'].focus();
+  (isCashExpense ? expenseSelect : incomeInput).focus();
 }
 function closeCashEntryEditor(){
   qs('#cashEntryEditModal').classList.add('hidden');
@@ -854,9 +1310,14 @@ function renderTopCustomers(rows){
   return `<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Sales</th><th>Revenue</th><th>Last purchase</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.transactions)}</td><td>${money(row.revenue)}</td><td>${row.last_purchase ? receiptDate(row.last_purchase) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
-function renderVatBreakdown(rows){
-  if (!rows?.length) return '';
-  return `<div class="table-wrap analytics-vat"><table><thead><tr><th>VAT rate</th><th>Invoices</th><th>VAT</th><th>Gross</th></tr></thead><tbody>${rows.map(row => `<tr><td>${(Number(row.rate) * 100).toFixed(1)}%</td><td>${Number(row.invoices)}</td><td>${money(row.vat)}</td><td>${money(row.gross)}</td></tr>`).join('')}</tbody></table></div>`;
+function renderBranchTable(rows){
+  if (!rows?.length) return '<div class="analytics-list-block"><h3>By branch</h3><p class="muted analytics-empty">No sales in this period.</p></div>';
+  return `<div class="analytics-list-block"><h3>By branch</h3><div class="table-wrap"><table><thead><tr><th>Branch</th><th>Transactions</th><th>Revenue</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.branch)}</td><td>${Number(row.transactions)}</td><td>${money(row.revenue)}</td></tr>`).join('')}</tbody></table></div></div>`;
+}
+
+function renderPaymentMixTable(rows){
+  if (!rows?.length) return '<div class="analytics-list-block"><h3>By payment method</h3><p class="muted analytics-empty">No sales in this period.</p></div>';
+  return `<div class="analytics-list-block"><h3>By payment method</h3><div class="table-wrap"><table><thead><tr><th>Method</th><th>Transactions</th><th>Revenue</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.method)}</td><td>${Number(row.transactions)}</td><td>${money(row.revenue)}</td></tr>`).join('')}</tbody></table></div></div>`;
 }
 
 function renderAnalytics(d){
@@ -906,10 +1367,11 @@ function renderAnalytics(d){
       ${analyticsCard('Open M-Pesa', money(Number(money_.pending.amount) + Number(money_.failed.amount)), {sub: `${Number(money_.pending.count)} pending · ${Number(money_.failed.count)} failed`})}
       ${analyticsCard('Discounts given', money(money_.discounts), {sub: money_.discount_pct === null ? 'No sales in period' : `${Number(money_.discount_pct).toFixed(1)}% of gross`})}
       ${analyticsCard('Voids', money(money_.voids.void_value), {sub: `${Number(money_.voids.count)} voided sale${Number(money_.voids.count) === 1 ? '' : 's'}`})}
+      ${analyticsCard('Returns refunded', money(d.returns.amount), {sub: `${Number(d.returns.count)} return${Number(d.returns.count) === 1 ? '' : 's'} · ${Number(d.returns.units)} unit(s) in period`})}
+      ${analyticsCard('Credit outstanding', money(d.receivables.outstanding), {sub: `${Number(d.receivables.debtors)} debtor(s) · all periods`})}
       ${analyticsCard('VAT collected', money(money_.vat), {sub: 'Included in revenue'})}
     </div>
     ${money_.voids.by_cashier?.length ? `<p class="muted analytics-note">Voids by cashier: ${money_.voids.by_cashier.map(row => `${esc(row.name)} (${Number(row.count)})`).join(' · ')}</p>` : ''}
-    ${renderVatBreakdown(money_.vat_breakdown)}
   </section>`);
 
   sections.push(`<section class="panel analytics-section">
@@ -938,11 +1400,17 @@ function renderAnalytics(d){
     <p class="muted analytics-note">Inventory values are a snapshot at current prices, not period movement.</p>
   </section>`);
 
+  const canEditExpenses = state.user?.role === 'ADMIN';
   sections.push(`<section class="panel analytics-section">
     <h2>Expenses</h2>
     ${Number(d.expenses.count) > 0
       ? `<div class="analytics-kpis">${analyticsCard('Total expenses', money(d.expenses.total), {sub: `${Number(d.expenses.count)} entr${Number(d.expenses.count) === 1 ? 'y' : 'ies'}`})}</div>
-         <div class="table-wrap"><table><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>${d.expenses.by_category.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.count)}</td><td>${money(row.total)}</td></tr>`).join('')}</tbody></table></div>`
+         <h3>By category</h3>
+         <div class="table-wrap"><table><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>${d.expenses.by_category.map(row => `<tr><td>${esc(row.name)}</td><td>${Number(row.count)}</td><td>${money(row.total)}</td></tr>`).join('')}</tbody></table></div>
+         ${d.expenses.unused?.length ? `<p class="muted analytics-note">No spend this period: ${d.expenses.unused.map(esc).join(' · ')}</p>` : ''}
+         <h3>Entries</h3>
+         <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th><th>Reference / Paid by</th>${canEditExpenses ? '<th>Action</th>' : ''}</tr></thead><tbody>${(d.expenses.entries || []).map(row => `<tr><td>${esc(receiptDate(row.created_at))}</td><td>${esc(row.category)}</td><td>${esc(row.description || '')}</td><td>${money(row.amount)}</td><td>${esc(row.reference || '-')}</td>${canEditExpenses ? `<td><button class="secondary" type="button" data-analytics-expense-edit="${row.id}" data-source="${esc(row.source)}">Edit</button></td>` : ''}</tr>`).join('')}</tbody></table></div>
+         ${canEditExpenses ? '<p class="muted analytics-note">Admins can edit an entry here; the change also shows on Cash Flow.</p>' : ''}`
       : '<p class="muted analytics-empty">No expenses recorded for this period.</p>'}
   </section>`);
 
@@ -964,6 +1432,26 @@ function renderAnalytics(d){
     ${renderTopCustomers(d.customers.top)}
   </section>`);
 
+  sections.push(`<section class="panel analytics-section">
+    <h2>Branches &amp; payment mix</h2>
+    <div class="analytics-lists">
+      ${renderBranchTable(d.branches)}
+      ${renderPaymentMixTable(d.payment_mix)}
+    </div>
+  </section>`);
+
+  sections.push(`<section class="panel analytics-section">
+    <h2>Credit &amp; receivables</h2>
+    <div class="analytics-kpis">
+      ${analyticsCard('Outstanding credit', money(d.receivables.outstanding), {sub: `${Number(d.receivables.debtors)} debtor(s) · all periods`})}
+      ${analyticsCard('0–30 days', money(d.receivables.ageing.current || 0))}
+      ${analyticsCard('31–60 days', money(d.receivables.ageing['31_60'] || 0))}
+      ${analyticsCard('61–90 days', money(d.receivables.ageing['61_90'] || 0))}
+      ${analyticsCard('Over 90 days', money(d.receivables.ageing.over_90 || 0))}
+    </div>
+    ${renderDebtorsTable(d.receivables.debtors_list)}
+  </section>`);
+
   const compliance = d.compliance;
   sections.push(`<section class="panel compliance-section">
     <h2>Compliance</h2>
@@ -978,6 +1466,7 @@ function renderAnalytics(d){
   </section>`);
 
   qs('#analyticsBody').innerHTML = sections.join('');
+  qsa('[data-analytics-expense-edit]').forEach(button => button.onclick = () => openCashEntryEditor(button.dataset.source, +button.dataset.analyticsExpenseEdit, d.expenses.entries));
 }
 
 async function loadAnalytics(){
@@ -1013,7 +1502,118 @@ async function loadAdmin(){
     qsa('[data-toggle-user]').forEach(button => button.onclick = () => setUserActive(+button.dataset.toggleUser, button.dataset.active !== '1'));
     qsa('[data-delete-user]').forEach(button => button.onclick = () => deleteUser(+button.dataset.deleteUser));
     qsa('[data-reset-user]').forEach(button => button.onclick = () => resetUserPassword(+button.dataset.resetUser));
+    await loadAdminRecordPickers();
     await Promise.all([loadSystemHealth(), loadAudit()]);
+  }
+}
+async function loadAdminRecordPickers(){
+  const productPick = qs('#adminProductPick');
+  const supplierPick = qs('#adminSupplierPick');
+  if (!productPick || !supplierPick) return;
+  const [products, suppliers] = await Promise.all([
+    api('list&table=products', null, 'GET').catch(() => ({rows: []})),
+    api('list&table=suppliers', null, 'GET').catch(() => ({rows: []})),
+  ]);
+  const productRows = products.rows || [];
+  const supplierRows = suppliers.rows || [];
+  productPick.innerHTML = '<option value="">Select product</option>' + productRows.map(p => `<option value="${esc(p.id)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('');
+  supplierPick.innerHTML = '<option value="">Select supplier</option>' + supplierRows.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  qs('#adminProductSupplier').innerHTML = '<option value="">Unassigned</option>' + supplierRows.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  const customerPick = qs('#adminCustomerPick');
+  if (customerPick) {
+    let customerRows = [];
+    try {
+      customerRows = (await api('list&table=customers', null, 'GET')).rows || [];
+    } catch (error) {
+      customerRows = [];
+    }
+    customerPick.innerHTML = '<option value="">Select customer</option>' + customerRows.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  }
+}
+async function adminLoadCustomer(){
+  const id = qs('#adminCustomerPick').value;
+  if (!id) return toast('Choose a customer to load');
+  const result = await api(`admin_customer_detail&id=${id}`, null, 'GET');
+  const c = result.customer;
+  const form = qs('#adminCustomerEditForm');
+  form.reset();
+  form.elements['id'].value = c.id;
+  form.elements['name'].value = c.name || '';
+  form.elements['phone'].value = c.phone || '';
+  form.elements['email'].value = c.email || '';
+  form.elements['kra_pin'].value = c.kra_pin || '';
+  form.elements['balance'].value = c.balance ?? 0;
+  form.classList.remove('hidden');
+  qs('#adminCustomerHint').classList.remove('hidden');
+}
+async function adminSaveCustomer(form){
+  const payload = formData(form);
+  try {
+    const result = await api('admin_update_customer', payload);
+    toast(result.changed ? `Customer updated: ${result.changes.length} change(s)` : 'Customer saved with no changes');
+    await loadAdminRecordPickers();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function adminLoadProduct(){
+  const id = qs('#adminProductPick').value;
+  if (!id) return toast('Choose a product to load');
+  const result = await api(`admin_product_detail&id=${id}`, null, 'GET');
+  const p = result.product;
+  const form = qs('#adminProductEditForm');
+  form.reset();
+  form.elements['id'].value = p.id;
+  form.elements['sku'].value = p.sku || '';
+  form.elements['barcode'].value = p.barcode || '';
+  form.elements['name'].value = p.name || '';
+  form.elements['category'].value = p.category || '';
+  form.elements['brand'].value = p.brand || '';
+  form.elements['warehouse'].value = p.warehouse || 'Main';
+  form.elements['branch'].value = p.branch || 'Main';
+  form.elements['supplier_id'].value = p.supplier_id ?? '';
+  form.elements['buying_price'].value = p.buying_price ?? '';
+  form.elements['selling_price'].value = p.selling_price ?? '';
+  form.elements['vat_rate'].value = p.vat_rate ?? '';
+  form.elements['quantity'].value = p.quantity ?? 0;
+  form.elements['supplied_quantity'].value = p.supplied_quantity ?? 0;
+  form.elements['reorder_level'].value = p.reorder_level ?? 0;
+  form.classList.remove('hidden');
+  qs('#adminProductHint').classList.remove('hidden');
+}
+async function adminSaveProduct(form){
+  const payload = formData(form);
+  try {
+    const result = await api('admin_update_product', payload);
+    toast(result.changed ? `Product updated: ${result.changes.length} change(s)` : 'Product saved with no changes');
+    await loadAdminRecordPickers();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function adminLoadSupplier(){
+  const id = qs('#adminSupplierPick').value;
+  if (!id) return toast('Choose a supplier to load');
+  const result = await api(`admin_supplier_detail&id=${id}`, null, 'GET');
+  const s = result.supplier;
+  const form = qs('#adminSupplierEditForm');
+  form.reset();
+  form.elements['id'].value = s.id;
+  form.elements['name'].value = s.name || '';
+  form.elements['phone'].value = s.phone || '';
+  form.elements['email'].value = s.email || '';
+  form.elements['kra_pin'].value = s.kra_pin || '';
+  form.elements['balance'].value = s.balance ?? 0;
+  form.classList.remove('hidden');
+}
+async function adminSaveSupplier(form){
+  const payload = formData(form);
+  try {
+    const result = await api('admin_update_supplier', payload);
+    toast(result.changed ? `Supplier updated: ${result.changes.length} change(s)` : 'Supplier saved with no changes');
+    await loadAdminRecordPickers();
+  } catch (error) {
+    toast(error.message);
   }
 }
 async function downloadCsv(type){
@@ -1417,6 +2017,87 @@ qs('#autoBackupToggle').onchange=async e=>{
 qs('#logoutBtn').onclick=async()=>{await api('logout'); location.reload()};
 qs('#cancelPaymentBtn').onclick=()=>{hidePaymentLoading(); toast('M-Pesa payment canceled. You can retry from the same sale.');};
 qs('#paymentMethod').onchange = renderCart;
+qs('#customerSelect').onchange = () => {
+  const select = qs('#customerSelect');
+  const nameInput = qs('#customerName');
+  if (!select || !nameInput) return;
+  if (select.value) {
+    const customer = state.customerOptions.find(item => String(item.id) === select.value);
+    nameInput.value = customer ? customer.name : '';
+    nameInput.disabled = true;
+  } else {
+    nameInput.disabled = false;
+  }
+};
+qs('#returnLookup').onclick = () => lookupReturnSale().catch(error => toast(error.message));
+qs('#returnSubmit').onclick = () => recordReturn();
+qs('#shiftOpenBtn').onclick = () => shiftOpen();
+qs('#shiftCloseBtn').onclick = () => shiftClose();
+qs('#poAddLine').onclick = () => addPurchaseOrderLine().catch(error => toast(error.message));
+qs('#poCreateBtn').onclick = () => createPurchaseOrder().catch(error => toast(error.message));
+qs('#poReceiveCancel').onclick = closePurchaseOrderReceive;
+qs('#poReceiveModal').onclick = event => { if (event.target === qs('#poReceiveModal')) closePurchaseOrderReceive(); };
+qs('#poReceiveForm').onsubmit = async event => {
+  event.preventDefault();
+  await submitPurchaseOrderReceive(event.target).catch(error => toast(error.message));
+};
+qs('#customerPaymentForm').onsubmit = async event => {
+  event.preventDefault();
+  const customerId = Number(qs('#paymentCustomer').value);
+  if (!customerId) return toast('Choose a customer with an outstanding balance');
+  const amount = qs('#paymentAmount').value;
+  if (amount === '' || Number(amount) <= 0) return toast('Enter a payment amount');
+  try {
+    const result = await api('create_customer_payment', {
+      customer_id: customerId,
+      amount,
+      method: qs('#paymentChannel').value,
+      reference: qs('#paymentReference').value.trim(),
+    });
+    toast(`Payment recorded. ${result.customer} now owes ${money(result.balance)}`);
+    qs('#paymentAmount').value = '';
+    qs('#paymentReference').value = '';
+    await loadPeople();
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#supplierPaymentForm').onsubmit = async event => {
+  event.preventDefault();
+  const supplierId = Number(qs('#supplierPaymentSupplier').value);
+  if (!supplierId) return toast('Choose a supplier with an outstanding balance');
+  const amount = qs('#supplierPaymentAmount').value;
+  if (amount === '' || Number(amount) <= 0) return toast('Enter a payment amount');
+  try {
+    const result = await api('create_supplier_payment', {
+      supplier_id: supplierId,
+      amount,
+      method: qs('#supplierPaymentChannel').value,
+      reference: qs('#supplierPaymentReference').value.trim(),
+    });
+    toast(`Payment recorded. We now owe ${result.supplier} ${money(result.balance)}`);
+    qs('#supplierPaymentAmount').value = '';
+    qs('#supplierPaymentReference').value = '';
+    await loadPeople();
+  } catch (error) {
+    toast(error.message);
+  }
+};
+qs('#adminProductLoad').onclick = () => adminLoadProduct().catch(error => toast(error.message));
+qs('#adminProductEditForm').onsubmit = async event => {
+  event.preventDefault();
+  await adminSaveProduct(event.target);
+};
+qs('#adminSupplierLoad').onclick = () => adminLoadSupplier().catch(error => toast(error.message));
+qs('#adminSupplierEditForm').onsubmit = async event => {
+  event.preventDefault();
+  await adminSaveSupplier(event.target);
+};
+qs('#adminCustomerLoad').onclick = () => adminLoadCustomer().catch(error => toast(error.message));
+qs('#adminCustomerEditForm').onsubmit = async event => {
+  event.preventDefault();
+  await adminSaveCustomer(event.target);
+};
 qs('#mpesaPhone').addEventListener('input', () => {
   const current = qs('#mpesaPhone');
   current.value = String(current.value || '').replace(/\D/g, '').replace(/^254/, '').slice(0, 9);
@@ -1457,6 +2138,9 @@ qs('#createQuoteBtn').onclick=()=>createQuotation().catch(error=>toast(error.mes
 qs('#cashFlowPeriod').onchange=()=>loadCashFlow().catch(error=>toast(error.message));
 qs('#cashFlowDate').onchange=()=>loadCashFlow().catch(error=>toast(error.message));
 qs('#cashFlowRefresh').onclick=()=>loadCashFlow().catch(error=>toast(error.message));
+qs('#cashMovementType').onchange=syncCashMovementCategory;
+syncCashMovementCategory();
+qs('#cashEntryEditForm').elements['type'].onchange=syncCashEntryCategory;
 document.addEventListener('click', event=>{
   const button=event.target.closest('[data-view-quotation],[data-pdf-quotation],[data-accept-quotation],[data-convert-quotation],[data-delete-quotation],[data-view-sale]');
   if(!button) return;
@@ -1467,7 +2151,7 @@ document.addEventListener('click', event=>{
   if(button.dataset.deleteQuotation) deleteQuotation(+button.dataset.deleteQuotation, button.dataset.converted === 'true');
   if(button.dataset.viewSale) viewSaleReceipt(+button.dataset.viewSale).catch(error=>toast(error.message));
 });
-qsa('.simpleForm').forEach(f=>f.onsubmit=async e=>{e.preventDefault(); try{await api(`save_simple&table=${f.dataset.table}`, formData(f)); f.reset(); await openPage(state.page); toast('Saved')}catch(err){toast(err.message)}});
+qsa('.simpleForm').forEach(f=>f.onsubmit=async e=>{e.preventDefault(); try{await api(`save_simple&table=${f.dataset.table}`, formData(f)); f.reset(); if (f.id === 'cashMovementForm') syncCashMovementCategory(); await openPage(state.page); if (f.dataset.table === 'cash_transactions') await refreshShiftPanel(); toast('Saved')}catch(err){toast(err.message)}});
 qs('#userForm').onsubmit=async e=>{e.preventDefault(); try{await api('create_user', formData(e.target)); e.target.reset(); await loadAdmin(); toast('User created')}catch(err){toast(err.message)}};
 qs('#resetBusinessForm').onsubmit=async e=>{e.preventDefault(); if(!window.confirm('This will permanently delete all business data. Continue?')) return; try{await api('reset_business_data',formData(e.target));e.target.reset();await openPage('dashboard');toast('Business data reset. User accounts were preserved.')}catch(err){toast(err.message)}};
 qs('#productEditCancel').onclick=closeProductEditor;
@@ -1516,7 +2200,8 @@ qs('#cashEntryEditForm').onsubmit=async e=>{
   try {
     await api('update_cash_entry', formData(e.target));
     closeCashEntryEditor();
-    await loadCashFlow();
+    if (state.page === 'analytics') await loadAnalytics();
+    else await loadCashFlow();
     toast('Entry updated');
   } catch (error) {
     toast(error.message);
