@@ -1,6 +1,11 @@
-# SAJI Hardware Web POS
+<img width="1920" height="1080" alt="Screenshot 2026-11-14 232736" src="https://github.com/user-attachments/assets/6bff37b8-2336-4c01-8196-444220945e94" /># SAJI Hardware Web POS
 
 Local web-based POS for **SAJI HARDWARE LTD** . It uses PHP, HTML, CSS, JavaScript, SQLite, and a small optional Python backup helper.
+<img width="1920" height="1080" alt="Screenshot 2026-11-14 233050" src="https://github.com/user-attachments/assets/123565fc-b754-4393-9dc7-46da34cb8742" />
+<img width="1920" height="1080" alt="Screenshot 2026-11-14 233003" src="https://github.com/user-attachments/assets/36d8a3e5-f98d-45ee-80b3-d5444244c8bd" />
+<img width="1920" height="1080" alt="Screenshot 2026-11-14 232736" src="https://github.com/user-attachments/assets/79ac91a7-f877-4cee-8977-ae6b61c63c83" />
+
+
 
 ## Features Included
 
