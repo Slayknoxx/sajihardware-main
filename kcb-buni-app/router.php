@@ -1,33 +1,43 @@
 <?php
-/**
- * router.php
- * Only needed when running with PHP's built-in server:
- *   php -S localhost:8000 router.php
- *
- * It lets a URL like /api/callback.php/SECRET correctly map to
- * api/callback.php with PATH_INFO = /SECRET, and serves everything
- * else (html/css/js) as normal static files.
- */
+declare(strict_types=1);
 
-$uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$path = str_replace('\\', '/', rawurldecode($path));
+if ($path === '' || $path[0] !== '/') {
+    $path = '/' . $path;
+}
+if (str_contains($path, "\0") || preg_match('#(^|/)\.\.(/|$)#', $path)) {
+    http_response_code(404);
+    echo 'Not found';
+    return true;
+}
 
-// Handle /api/callback.php/<secret>
-if (preg_match('#^/api/callback\.php(/.*)?$#', $uri, $m)) {
-    $_SERVER['PATH_INFO'] = $m[1] ?? '';
+if (preg_match('#^/api/callback\.php(/.*)?$#', $path, $match)) {
+    $_SERVER['PATH_INFO'] = $match[1] ?? '';
     require __DIR__ . '/api/callback.php';
     return true;
 }
 
-// Serve existing static files directly
-$filePath = __DIR__ . $uri;
-if ($uri !== '/' && file_exists($filePath) && !is_dir($filePath)) {
-    return false; // let the built-in server handle it
-}
-
-// Fallback to index.html for the root
-if ($uri === '/' || $uri === '') {
-    require __DIR__ . '/index.html';
+if (in_array($path, ['/api/stk_push.php', '/api/status.php'], true)) {
+    require __DIR__ . substr($path, 1);
     return true;
 }
 
-return false;
+if ($path === '/' || $path === '/index.html') {
+    return false;
+}
+
+if (str_starts_with($path, '/assets/')) {
+    $assetsRoot = realpath(__DIR__ . '/assets');
+    $target = realpath(__DIR__ . $path);
+    if ($assetsRoot !== false && $target !== false && is_file($target)) {
+        $normalizedRoot = rtrim(strtolower($assetsRoot), '\\/') . DIRECTORY_SEPARATOR;
+        if (str_starts_with(strtolower($target), $normalizedRoot)) {
+            return false;
+        }
+    }
+}
+
+http_response_code(404);
+echo 'Not found';
+return true;

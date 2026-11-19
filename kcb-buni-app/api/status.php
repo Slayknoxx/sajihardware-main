@@ -33,9 +33,6 @@ echo json_encode([
     'success' => true,
     'status' => $tx['status'], // PENDING | SUCCESS | FAILED
     'amount' => $tx['amount'],
-    'phone' => $tx['phone_number'],
     'resultDesc' => $tx['result_desc'],
     'mpesaReceipt' => $tx['mpesa_receipt'],
-    'createdAt' => $tx['created_at'],
-    'updatedAt' => $tx['updated_at'],
 ]);

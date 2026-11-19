@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/bootstrap.php';
 
 try {
-    require_payment_user();
+    $user = require_payment_user();
     init_db();
     $saleId = (int)($_GET['sale_id'] ?? 0);
     $reference = trim((string)($_GET['reference'] ?? ''));
@@ -21,12 +21,15 @@ try {
     }
     $payment = $stmt->fetch();
 
-    $saleStmt = db()->prepare('SELECT id, receipt_no, status, mpesa_status, payment_reference, mpesa_request_id, mpesa_receipt_no, amount_paid, total FROM sales WHERE id=? OR payment_reference=? LIMIT 1');
-    $saleStmt->execute([$saleId, $reference]);
+    $saleStmt = $reference !== ''
+        ? db()->prepare('SELECT id, receipt_no, status, mpesa_status, payment_reference, mpesa_request_id, mpesa_receipt_no, amount_paid, total, created_by FROM sales WHERE payment_reference=? LIMIT 1')
+        : db()->prepare('SELECT id, receipt_no, status, mpesa_status, payment_reference, mpesa_request_id, mpesa_receipt_no, amount_paid, total, created_by FROM sales WHERE id=? LIMIT 1');
+    $saleStmt->execute($reference !== '' ? [$reference] : [$saleId]);
     $sale = $saleStmt->fetch();
-    if (!$sale) {
+    if (!$sale || !security_user_can_access_sale($user, $sale)) {
         payment_json(['error' => 'Sale not found.'], 404);
     }
+    unset($sale['created_by']);
     $paid = $payment && $payment['status'] === 'PAID'
         && $sale['status'] === 'COMPLETED'
         && $sale['mpesa_status'] === 'PAID'

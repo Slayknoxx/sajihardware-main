@@ -271,8 +271,28 @@ try {
         if (!in_array($table, $allowed, true)) {
             json_response(['error' => 'Unsupported table'], 400);
         }
+        $tableRoles = [
+            'users' => ['ADMIN'],
+            'employees' => ['ADMIN', 'MANAGER'],
+            'branches' => ['ADMIN', 'MANAGER'],
+            'customers' => ['ADMIN', 'MANAGER'],
+            'suppliers' => ['ADMIN', 'MANAGER'],
+            'sales' => ['ADMIN', 'MANAGER'],
+            'sale_items' => ['ADMIN', 'MANAGER'],
+            'returns' => ['ADMIN', 'MANAGER'],
+            'expenses' => ['ADMIN', 'MANAGER'],
+            'cash_transactions' => ['ADMIN', 'MANAGER'],
+            'purchase_orders' => ['ADMIN', 'MANAGER'],
+            'purchase_order_items' => ['ADMIN', 'MANAGER'],
+            'customer_payments' => ['ADMIN', 'MANAGER'],
+            'supplier_payments' => ['ADMIN', 'MANAGER'],
+            'sync_queue' => ['ADMIN'],
+            'audit_logs' => ['ADMIN'],
+        ];
+        if (isset($tableRoles[$table])) {
+            require_role($tableRoles[$table]);
+        }
         if ($table === 'users') {
-            require_role(['ADMIN']);
             $rows = db()->query('SELECT id, username, full_name, role, branch, active, created_at FROM users ORDER BY id DESC')->fetchAll();
         } elseif ($table === 'products') {
             $rows = db()->query('SELECT p.*, COALESCE(s.name, "Unassigned") supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC LIMIT 300')->fetchAll();
@@ -292,14 +312,14 @@ try {
                 : 'SELECT * FROM sale_items ORDER BY id DESC LIMIT 300';
             $rows = db()->query($query)->fetchAll();
         } elseif ($table === 'returns') {
-            require_role(['ADMIN', 'MANAGER']);
             $rows = db()->query('SELECT r.*, p.name AS product_name, p.sku AS product_sku FROM returns r LEFT JOIN products p ON p.id = r.product_id ORDER BY r.id DESC LIMIT 300')->fetchAll();
         } elseif ($table === 'quotations') {
             $rows = db()->query('SELECT q.id, q.quote_no, q.customer_name, q.customer_kra_pin, q.subtotal, q.tax, q.discount, q.total, q.status, q.valid_until, q.converted_sale_id, q.created_at, s.receipt_no FROM quotations q LEFT JOIN sales s ON s.id=q.converted_sale_id ORDER BY q.id DESC LIMIT 300')->fetchAll();
+        } elseif ($table === 'held_sales' && !in_array((string)$user['role'], ['ADMIN', 'MANAGER'], true)) {
+            $stmt = db()->prepare('SELECT * FROM held_sales WHERE created_by = ? ORDER BY id DESC LIMIT 300');
+            $stmt->execute([(int)$user['id']]);
+            $rows = $stmt->fetchAll();
         } else {
-            if ($table === 'audit_logs') {
-                require_role(['ADMIN']);
-            }
             $rows = db()->query("SELECT * FROM {$table} ORDER BY id DESC LIMIT 300")->fetchAll();
         }
         json_response(['rows' => $rows]);
@@ -1279,6 +1299,9 @@ try {
         $stmt = db()->prepare('SELECT * FROM sales WHERE id = ?');
         $stmt->execute([$id]);
         $sale = $stmt->fetch();
+        if ($sale && !security_user_can_access_sale($user, $sale)) {
+            json_response(['error' => 'Sale not found'], 404);
+        }
         $items = [];
         if ($sale) {
             if ($sale['payment_method'] === 'M-Pesa' && $sale['status'] !== 'COMPLETED') {
@@ -1307,12 +1330,15 @@ try {
     }
     
     if ($action === 'generate_qr') {
-        require_login();
+        $qrUser = require_login();
         $id = (int)($_GET['sale_id'] ?? 0);
         $stmt = db()->prepare('SELECT * FROM sales WHERE id = ?');
         $stmt->execute([$id]);
         $sale = $stmt->fetch();
         if (!$sale) {
+            json_response(['error' => 'Sale not found'], 404);
+        }
+        if (!security_user_can_access_sale($qrUser, $sale)) {
             json_response(['error' => 'Sale not found'], 404);
         }
         

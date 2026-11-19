@@ -9,15 +9,13 @@ customer responds.
 ```
 kcb-buni-app/
 ├── index.html          Form + success/failure UI
-├── transactions.html   Successful/unsuccessful transaction list
 ├── assets/
 │   ├── style.css
 │   └── script.js        Sends the request and polls for the result
 ├── api/
 │   ├── stk_push.php      Starts the STK push (called by the browser)
 │   ├── callback.php       KCB calls this when the customer responds
-│   ├── status.php         Browser polls this to know when it's done
-│   └── transactions.php   Lists recent transaction results
+│   └── status.php         Browser polls this to know when it's done
 ├── config.php            Loads your .env secrets
 ├── kcb_client.php         Talks to the KCB Buni API (token + STK push)
 ├── db.php                 Stores transactions in SQLite

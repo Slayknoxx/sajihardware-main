@@ -1,5 +1,10 @@
 Options -Indexes
 
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^data(/|$) - [F,L]
+</IfModule>
+
 <IfModule mod_php.c>
     AcceptPathInfo On
 </IfModule>
@@ -11,7 +16,7 @@ Options -Indexes
 </IfModule>
 
 # Block direct access to sensitive files
-<FilesMatch "^(\.env|config\.php|db\.php|kcb_client\.php)$">
+<FilesMatch "^(\.env|config\.php|db\.php|kcb_client\.php)$|\.(sqlite|sqlite3|db|log)$">
     Require all denied
 </FilesMatch>
 

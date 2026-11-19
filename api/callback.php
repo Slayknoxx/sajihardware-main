@@ -12,25 +12,7 @@ function redact_callback_payload(string $raw): string
         return $raw;
     }
 
-    $sensitiveKeys = ['phone', 'phoneNumber', 'msisdn', 'PhoneNumber', 'token', 'secret', 'password', 'MpesaReceiptNumber', 'AccountReference', 'checkoutRequestId', 'merchantRequestId', 'resultCode', 'resultDescription'];
-    $walk = static function (array $value) use (&$walk, $sensitiveKeys): array {
-        foreach ($value as $key => $item) {
-            if (is_array($item)) {
-                $value[$key] = $walk($item);
-                continue;
-            }
-            $match = strtolower((string)$key);
-            foreach ($sensitiveKeys as $sensitiveKey) {
-                if (str_contains($match, $sensitiveKey)) {
-                    $value[$key] = '[REDACTED]';
-                    break;
-                }
-            }
-        }
-        return $value;
-    };
-
-    return json_encode($walk($decoded), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: $raw;
+    return json_encode(security_redact_callback_data($decoded), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) ?: $raw;
 }
 
 $suppliedSecret = trim((string)($_GET['token'] ?? ''));

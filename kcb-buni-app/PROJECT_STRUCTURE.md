@@ -7,7 +7,6 @@ Simple PHP + HTML/CSS/JS app that triggers M-Pesa STK push payments via KCB Buni
 ```
 kcb-buni-app/
 ├── index.html                 # Payment form UI + success/failure screens
-├── transactions.html          # List of recent transactions
 ├── config.php                 # Loads .env, defines KCB constants
 ├── kcb_client.php            # KCB API client (token + STK push)
 ├── db.php                    # SQLite wrapper for transactions
@@ -21,7 +20,6 @@ kcb-buni-app/
 │   ├── stk_push.php         # POST endpoint: triggers STK push, stores pending tx
 │   ├── callback.php         # Receives KCB callback after user responds, updates tx
 │   ├── status.php           # GET endpoint: frontend polls this for payment status
-│   └── transactions.php     # GET endpoint: lists recent transactions
 │
 ├── assets/
 │   ├── script.js            # Browser logic (form submit, polling, UI state)

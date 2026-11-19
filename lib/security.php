@@ -125,6 +125,46 @@ function security_require_csrf(): void
     }
 }
 
+function security_user_can_access_sale(array $user, array $sale): bool
+{
+    if (in_array((string)($user['role'] ?? ''), ['ADMIN', 'MANAGER'], true)) {
+        return true;
+    }
+
+    return (int)($sale['created_by'] ?? 0) > 0
+        && (int)($sale['created_by'] ?? 0) === (int)($user['id'] ?? 0);
+}
+
+function security_redact_callback_data(array $payload): array
+{
+    $sensitiveKeys = ['phone', 'msisdn', 'token', 'secret', 'password', 'receipt', 'accountreference', 'checkoutrequestid', 'merchantrequestid', 'resultcode', 'resultdescription'];
+    $walk = static function (array $value) use (&$walk, $sensitiveKeys): array {
+        $metadataName = strtolower((string)($value['Name'] ?? ''));
+        foreach ($sensitiveKeys as $sensitiveKey) {
+            if ($metadataName !== '' && str_contains($metadataName, $sensitiveKey) && array_key_exists('Value', $value)) {
+                $value['Value'] = '[REDACTED]';
+                break;
+            }
+        }
+        foreach ($value as $key => $item) {
+            if (is_array($item)) {
+                $value[$key] = $walk($item);
+                continue;
+            }
+            $keyLower = strtolower((string)$key);
+            foreach ($sensitiveKeys as $sensitiveKey) {
+                if (str_contains($keyLower, $sensitiveKey)) {
+                    $value[$key] = '[REDACTED]';
+                    break;
+                }
+            }
+        }
+        return $value;
+    };
+
+    return $walk($payload);
+}
+
 /**
  * Lightweight origin check for the login request (no CSRF token exists yet).
  */

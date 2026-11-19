@@ -32,6 +32,12 @@ function check(string $name, bool $condition, string $detail = ''): void
     echo "FAIL  {$name}" . ($detail !== '' ? " ({$detail})" : '') . "\n";
 }
 
+check('sale access permits its creator', security_user_can_access_sale(['id' => 12, 'role' => 'EMPLOYEE'], ['created_by' => 12]));
+check('sale access denies a different employee', !security_user_can_access_sale(['id' => 13, 'role' => 'EMPLOYEE'], ['created_by' => 12]));
+check('sale access permits manager review', security_user_can_access_sale(['id' => 13, 'role' => 'MANAGER'], ['created_by' => 12]));
+$redactedCallback = security_redact_callback_data(['Body' => ['stkCallback' => ['CallbackMetadata' => ['Item' => [['Name' => 'PhoneNumber', 'Value' => '254700000000'], ['Name' => 'MpesaReceiptNumber', 'Value' => 'ABC123'], ['Name' => 'Amount', 'Value' => 100]]]]]]);
+check('callback redaction handles nested camelCase sensitive fields', $redactedCallback['Body']['stkCallback']['CallbackMetadata']['Item'][0]['Value'] === '[REDACTED]' && $redactedCallback['Body']['stkCallback']['CallbackMetadata']['Item'][1]['Value'] === '[REDACTED]' && $redactedCallback['Body']['stkCallback']['CallbackMetadata']['Item'][2]['Value'] === 100);
+
 $cleanup = static function () use ($tmp): void {
     db_close();
     foreach (glob($tmp . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . '*') ?: [] as $file) {
